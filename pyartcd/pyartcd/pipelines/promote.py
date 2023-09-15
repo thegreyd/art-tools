@@ -1410,7 +1410,7 @@ class PromotePipeline:
             return
 
         self._logger.info("Sending a notification to QE and multi-arch QE...")
-        jira_issue_link = "https://jira.example.com/browse/FOO-1" if self.runtime.dry_run else parent_jira.permalink()
+        jira_issue_link = parent_jira.permalink()
         nightlies_w_pullspecs = nightlies_with_pullspecs(nightlies)
         self._send_notification_email(release_name, impetus_advisories, jira_issue_link,
                                       nightlies_w_pullspecs)

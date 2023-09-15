@@ -26,7 +26,7 @@ from doozerlib.util import (brew_arch_for_go_arch, brew_suffix_for_arch,
                             go_arch_for_brew_arch, go_suffix_for_arch)
 from pyartcd.locks import Lock
 from pyartcd.signatory import AsyncSignatory
-from pyartcd.util import nightlies_with_pullspecs, get_assembly_basis
+from pyartcd.util import nightlies_with_pullspecs
 from pyartcd import constants, exectools, locks, util, jenkins
 from pyartcd.cli import cli, click_coroutine, pass_runtime
 from pyartcd.exceptions import VerificationError
@@ -169,9 +169,10 @@ class PromotePipeline:
                 raise ValueError("Previous list (`upgrades` field in group config) has an invalid semver.")
 
             impetus_advisories = group_config.get("advisories", {})
-
+            release_jira = group_config.get("release_jira", '')
+            reference_releases = util.get_assembly_basis(releases_config, self.assembly).get("reference_releases", {})
             # Send notification to QE
-            self.send_notification_email(group_config, release_name, impetus_advisories)
+            self.send_notification_email(release_jira, release_name, impetus_advisories, reference_releases.values())
 
             return
 
@@ -1387,22 +1388,21 @@ class PromotePipeline:
         subject = f"OCP {release_name} Image List"
         return await exectools.to_thread(self._mail.send_mail, self.runtime.config["email"]["promote_image_list_recipients"], subject, content, archive_dir=archive_dir, dry_run=self.runtime.dry_run)
 
-    def send_notification_email(self, group_config, release_name, impetus_advisories):
+    def send_notification_email(self, release_jira: str, release_name: str, impetus_advisories: Dict[str, int],
+                                nightlies: List[str]):
         """
         Send a notification email to QEs if it hasn't been done yet
         check release jira subtask for task status
         """
-
-        jira_issue_key = group_config.get("release_jira")
-        if not jira_issue_key:
+        if not release_jira:
             return
 
-        self._logger.info("Checking notify QE release subtask in release_jira: %s", jira_issue_key)
-        parent_jira = self._jira_client.get_issue(jira_issue_key)
+        self._logger.info("Checking notify QE release subtask in release_jira: %s", release_jira)
+        parent_jira = self._jira_client.get_issue(release_jira)
         title = "Notify QE of release advisories"
         subtask = next((s for s in parent_jira.fields.subtasks if title in s.fields.summary), None)
         if not subtask:
-            raise ValueError("Notify QE release subtask not found in release_jira: %s", jira_issue_key)
+            raise ValueError("Notify QE release subtask not found in release_jira: %s", release_jira)
 
         self._logger.info("Found subtask in release_jira: %s with status %s", subtask.key, subtask.fields.status.name)
 
@@ -1411,7 +1411,6 @@ class PromotePipeline:
 
         self._logger.info("Sending a notification to QE and multi-arch QE...")
         jira_issue_link = "https://jira.example.com/browse/FOO-1" if self.runtime.dry_run else parent_jira.permalink()
-        nightlies = get_assembly_basis(releases_config, self.assembly).get("reference_releases", {}).values()
         nightlies_w_pullspecs = nightlies_with_pullspecs(nightlies)
         self._send_notification_email(release_name, impetus_advisories, jira_issue_link,
                                       nightlies_w_pullspecs)

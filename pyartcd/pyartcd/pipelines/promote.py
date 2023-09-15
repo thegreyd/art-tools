@@ -26,7 +26,7 @@ from doozerlib.util import (brew_arch_for_go_arch, brew_suffix_for_arch,
                             go_arch_for_brew_arch, go_suffix_for_arch)
 from pyartcd.locks import Lock
 from pyartcd.signatory import AsyncSignatory
-from pyartcd.util import nightlies_with_pullspecs
+from pyartcd.util import nightlies_with_pullspecs, get_assembly_basis
 from pyartcd import constants, exectools, locks, util, jenkins
 from pyartcd.cli import cli, click_coroutine, pass_runtime
 from pyartcd.exceptions import VerificationError
@@ -1411,8 +1411,8 @@ class PromotePipeline:
 
         self._logger.info("Sending a notification to QE and multi-arch QE...")
         jira_issue_link = "https://jira.example.com/browse/FOO-1" if self.runtime.dry_run else parent_jira.permalink()
-        nightlies = group_config.get("reference_releases", {})
-        nightlies_w_pullspecs = nightlies_with_pullspecs(nightlies.values())
+        nightlies = get_assembly_basis(releases_config, self.assembly).get("reference_releases", {}).values()
+        nightlies_w_pullspecs = nightlies_with_pullspecs(nightlies)
         self._send_notification_email(release_name, impetus_advisories, jira_issue_link,
                                       nightlies_w_pullspecs)
         if not self.runtime.dry_run:

@@ -327,7 +327,7 @@ class PromotePipeline:
                 # update jira promote task status
                 self._logger.info("Updating promote release subtask")
                 jira_issue_key = group_config.get("release_jira")
-                if jira_issue_key and not self.dry_run:
+                if jira_issue_key and not self.runtime.dry_run:
                     parent_jira = self._jira_client.get_issue(jira_issue_key)
                     title = "[Wed] Promote the tested nightly"
                     subtask = next((s for s in parent_jira.fields.subtasks if title in s.fields.summary), None)
@@ -1410,12 +1410,12 @@ class PromotePipeline:
             return
 
         self._logger.info("Sending a notification to QE and multi-arch QE...")
-        jira_issue_link = "https://jira.example.com/browse/FOO-1" if self.dry_run else parent_jira.permalink()
+        jira_issue_link = "https://jira.example.com/browse/FOO-1" if self.runtime.dry_run else parent_jira.permalink()
         nightlies = group_config.get("reference_releases", {})
         nightlies_w_pullspecs = nightlies_with_pullspecs(nightlies.values())
         self._send_notification_email(release_name, impetus_advisories, jira_issue_link,
                                       nightlies_w_pullspecs)
-        if not self.dry_run:
+        if not self.runtime.dry_run:
             self._jira_client.assign_to_me(subtask)
             self._jira_client.close_task(subtask)
             self._logger.info("Closed subtask %s", subtask.key)
@@ -1448,7 +1448,7 @@ class PromotePipeline:
         mail = MailService.from_config(self.runtime.config)
         mail.send_mail(
             self.runtime.config["email"][f"qe_notification_recipients_ocp{release_version[0]}"],
-            subject, content, archive_dir=email_dir, dry_run=self.dry_run)
+            subject, content, archive_dir=email_dir, dry_run=self.runtime.dry_run)
 
 
 @cli.command("promote")

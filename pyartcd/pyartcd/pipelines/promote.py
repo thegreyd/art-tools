@@ -146,7 +146,7 @@ class PromotePipeline:
             message += " [DRY RUN]"
         else:
             message += " @release-artists"
-        slack_response = await self._slack_client.say()
+        slack_response = await self._slack_client.say(message)
         slack_thread = slack_response["message"]["ts"]
 
         justifications = []

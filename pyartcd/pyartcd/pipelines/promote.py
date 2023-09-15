@@ -173,6 +173,8 @@ class PromotePipeline:
             # Send notification to QE
             self.send_notification_email(group_config, release_name, impetus_advisories)
 
+            return
+
             # Check for blocker bugs
             if self.skip_blocker_bug_check or assembly_type in [assembly.AssemblyTypes.CANDIDATE, assembly.AssemblyTypes.CUSTOM, assembly.AssemblyTypes.PREVIEW]:
                 logger.info("Blocker Bug check is skipped.")

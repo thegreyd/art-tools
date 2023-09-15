@@ -141,7 +141,12 @@ class PromotePipeline:
         logger.info("Release name: %s", release_name)
 
         self._slack_client.bind_channel(release_name)
-        slack_response = await self._slack_client.say(f"Promoting release `{release_name}` @release-artists")
+        message = f"Promoting release `{release_name}`"
+        if self.runtime.dry_run:
+            message += " [DRY RUN]"
+        else:
+            message += " @release-artists"
+        slack_response = await self._slack_client.say()
         slack_thread = slack_response["message"]["ts"]
 
         justifications = []
@@ -164,6 +169,9 @@ class PromotePipeline:
                 raise ValueError("Previous list (`upgrades` field in group config) has an invalid semver.")
 
             impetus_advisories = group_config.get("advisories", {})
+
+            # Send notification to QE
+            self.send_notification_email(group_config, release_name, impetus_advisories)
 
             # Check for blocker bugs
             if self.skip_blocker_bug_check or assembly_type in [assembly.AssemblyTypes.CANDIDATE, assembly.AssemblyTypes.CUSTOM, assembly.AssemblyTypes.PREVIEW]:
@@ -262,9 +270,6 @@ class PromotePipeline:
             # Before waiting for release images to be accepted by release controllers,
             # we can start microshift build
             await self._build_microshift(releases_config)
-
-            # Send notification to QE
-            self.send_notification_email(group_config, release_name, impetus_advisories)
 
             if not tag_stable:
                 self._logger.warning("Release %s will not appear on release controllers. Pullspecs: %s", release_name, pullspecs_repr)
@@ -1390,12 +1395,14 @@ class PromotePipeline:
         if not jira_issue_key:
             return
 
-        self._logger.info("Checking notify QE release subtask")
+        self._logger.info("Checking notify QE release subtask in release_jira: %s", jira_issue_key)
         parent_jira = self._jira_client.get_issue(jira_issue_key)
         title = "Notify QE of release advisories"
         subtask = next((s for s in parent_jira.fields.subtasks if title in s.fields.summary), None)
         if not subtask:
             raise ValueError("Notify QE release subtask not found in release_jira: %s", jira_issue_key)
+
+        self._logger.info("Found subtask in release_jira: %s with status %s", subtask.key, subtask.fields.status.name)
 
         if subtask.fields.status.name == "Closed":
             return
@@ -1409,6 +1416,9 @@ class PromotePipeline:
         if not self.dry_run:
             self._jira_client.assign_to_me(subtask)
             self._jira_client.close_task(subtask)
+            self._logger.info("Closed subtask %s", subtask.key)
+        else:
+            self._logger.info("Would've closed subtask %s", subtask.key)
 
     @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_fixed(10))
     def _send_notification_email(self, release_name: str, advisories: Dict[str, int], jira_link: str, nightlies):

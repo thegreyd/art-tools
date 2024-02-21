@@ -20,6 +20,28 @@ type_bug_list = List[Bug]
 type_bug_set = Set[Bug]
 
 
+class BugAttachIssue:
+    def __init__(self, bug_id: str, msg: str):
+        """
+        :param bug_id: ID of the bug that has the issue
+        :param msg: A human-readable message describing the issue.
+        """
+        self.bug_id: str = bug_id
+        self.msg: str = msg
+
+    def __str__(self):
+        return f"{self.bug_id}: {self.msg}"
+
+    def __repr__(self):
+        return f"{self.bug_id}: {self.msg}"
+
+    def to_dict(self):
+        return {
+            "bug": self.bug_id,
+            "reason": self.msg,
+        }
+
+
 class FindBugsMode:
     def __init__(self, status: List, cve_only: bool):
         self.status = set(status)
@@ -224,10 +246,15 @@ async def find_and_attach_bugs(runtime: Runtime, advisory_id, default_advisory_t
 
     advisory_ids = runtime.get_default_advisories()
     included_bug_ids, _ = get_assembly_bug_ids(runtime, bug_tracker_type=bug_tracker.type)
-    bugs_by_type, _ = categorize_bugs_by_type(bugs, advisory_ids, included_bug_ids,
-                                              permissive=permissive,
-                                              major_version=major_version,
-                                              operator_bundle_advisory=operator_bundle_advisory)
+    bugs_by_type, bug_issues = categorize_bugs_by_type(bugs, advisory_ids, included_bug_ids,
+                                                       major_version=major_version,
+                                                       operator_bundle_advisory=operator_bundle_advisory)
+    if not permissive:
+        for i in bug_issues:
+            logger.error(i)
+        raise ValueError("Critical issues were found with following bugs. Please fix or use --permissive to ignore "
+                         "them")
+
     for kind, kind_bugs in bugs_by_type.items():
         logger.info(f'{kind} bugs: {[b.id for b in kind_bugs]}')
 
@@ -269,9 +296,9 @@ def get_assembly_bug_ids(runtime, bug_tracker_type):
 
 def categorize_bugs_by_type(bugs: List[Bug], advisory_id_map: Dict[str, int],
                             permitted_bug_ids, operator_bundle_advisory: str = "metadata",
-                            permissive=False, major_version: int = 4):
-    issues = []
+                            major_version: int = 4) -> (Dict[str, type_bug_set], List[BugAttachIssue]):
 
+    issues: List[BugAttachIssue] = []
     bugs_by_type: Dict[str, type_bug_set] = {
         "rpm": set(),
         "image": set(),
@@ -293,7 +320,6 @@ def categorize_bugs_by_type(bugs: List[Bug], advisory_id_map: Dict[str, int],
     # for 4.x, first sort all non_tracker_bugs
     tracker_bugs: type_bug_set = set()
     non_tracker_bugs: type_bug_set = set()
-    fake_trackers: type_bug_set = set()
 
     for b in bugs:
         if b.is_tracker_bug():
@@ -301,21 +327,14 @@ def categorize_bugs_by_type(bugs: List[Bug], advisory_id_map: Dict[str, int],
         else:
             non_tracker_bugs.add(b)
             if b.is_invalid_tracker_bug():
-                fake_trackers.add(b)
+                message = "Bug has `CVE` in title but does not have proper security tracker labels."
+                issues.append(BugAttachIssue(b.id, message))
 
     bugs_by_type["extras"] = extras_bugs(non_tracker_bugs)
     remaining = non_tracker_bugs - bugs_by_type["extras"]
     bugs_by_type["microshift"] = {b for b in remaining if b.component and b.component.startswith('MicroShift')}
     remaining = remaining - bugs_by_type["microshift"]
     bugs_by_type["image"] = remaining
-
-    if fake_trackers:
-        message = f"Bug(s) {[t.id for t in fake_trackers]} look like CVE trackers, but really are not."
-        if permissive:
-            logger.warning(f"{message} Ignoring them.")
-            issues.append(message)
-        else:
-            raise ElliottFatalError(f"{message} Please fix.")
 
     if not tracker_bugs:
         return bugs_by_type, issues
@@ -364,25 +383,19 @@ def categorize_bugs_by_type(bugs: List[Bug], advisory_id_map: Dict[str, int],
     not_found = set(tracker_bugs) - found
     if not_found:
         not_found_with_component = [(b.id, b.whiteboard_component) for b in not_found]
-        logger.warning('No attached builds found in advisories for tracker bugs (bug, package):'
-                       f' {not_found_with_component}.')
+        logger.info('No attached builds found in advisories for tracker bugs (bug, package):'
+                    f' {not_found_with_component}.')
 
         still_not_found = not_found
         if permitted_bug_ids:
-            logger.warning('The following bugs will be attached because they are '
-                           f'explicitly included in the assembly config: {permitted_bug_ids}')
+            logger.info('The following bugs will be attached because they are '
+                        f'explicitly included in the assembly config: {permitted_bug_ids}')
             still_not_found = {b for b in not_found if b.id not in permitted_bug_ids}
 
-        if still_not_found:
-            still_not_found_with_component = [(b.id, b.whiteboard_component) for b in still_not_found]
-            message = ('No attached builds found in advisories for tracker bugs (bug, package): '
-                       f'{still_not_found_with_component}. Either attach builds or explicitly include/exclude the bug '
-                       f'ids in the assembly definition')
-            if permissive:
-                logger.warning(f"{message} Ignoring them for now.")
-                issues.append(message)
-            else:
-                raise ValueError(message)
+        for b in still_not_found:
+            message = f'No build of package {b.whiteboard_component} found in advisories for the tracker bug. '\
+                      'Either attach builds or include/exclude the bug in assembly definition'
+            issues.append(BugAttachIssue(b.id, message))
 
     return bugs_by_type, issues
 

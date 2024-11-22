@@ -221,18 +221,21 @@ class UpdateGolangPipeline:
         if not self.tag_builds:
             return True
         # Tag builds into override tag
-        self.tag_builds(el_v, nvr)
+        self.tag_build(el_v, nvr)
         # Regen repo
         if await self.regen_repo_with_complete(el_v):
             _LOGGER.info("Regen-repo not success")
+            return True
+        if self.dry_run:
+            _LOGGER.info(f"[DRY RUN] Would have waited for {nvr} to be available in {el_v} build tag")
             return False
         # Wait for repo to be available (5 hours max)
         for _ in range(30):
             await asyncio.sleep(600)  # 10 minutes
             if await is_latest_and_available(self.ocp_version, el_v, nvr, self.koji_session):
-                return True
+                return False
             _LOGGER.info("wait 10 mins...")
-        return True
+        return False
 
     def brew_login(self):
         if not self.koji_session.logged_in:
@@ -242,22 +245,29 @@ class UpdateGolangPipeline:
     async def regen_repo_with_complete(self, el_v):
         build_tag = f'rhaos-{self.ocp_version}-rhel-{el_v}-build'
         self.brew_login()
+        if self.dry_run:
+            _LOGGER.info(f"[DRY RUN] Would have regenerated repo for tag: {build_tag}")
+            return False
         task_id = self.koji_session.newRepo(build_tag)
         _LOGGER.info(f"Regenerating repo for tag: {build_tag} with task {task_id}, waiting...")
         return await watch_task_async(self.koji_session, _LOGGER.info, task_id)
 
-    def tag_builds(self, el_v, nvr):
+    def tag_build(self, el_v, nvr):
         build_tag = f'rhaos-{self.ocp_version}-rhel-{el_v}-override'
         self.brew_login()
+        nvrs_to_tag = {nvr}
         if el_v == 8:
             rhel8_module_tag = self.get_module_tag(nvr, el_v)
             if rhel8_module_tag:
                 latest_rhel8_builds = self.koji_session.listTagged(rhel8_module_tag, latest=True, inherit=True)
                 # need to tag delve go-toolset golang 3 module builds
                 for el8_nvr in [b['nvr'] for b in latest_rhel8_builds]:
-                    self.koji_session.tagBuild(build_tag, el8_nvr)
-                    _LOGGER.info(f"Tagged {el8_nvr} with {build_tag} tag")
-        else:
+                    nvrs_to_tag.add(el8_nvr)
+
+        for nvr in nvrs_to_tag:
+            if self.dry_run:
+                _LOGGER.info(f"[DRY RUN] Would have tagged {nvr} into {build_tag}")
+                continue
             self.koji_session.tagBuild(build_tag, nvr)
             _LOGGER.info(f"Tagged {nvr} with {build_tag} tag")
 

@@ -50,6 +50,9 @@ class RepositoryType(Enum):
     PUBLIC = 1
 
 
+UNVIABLE_ASSEMBLY_ERROR_MSG = "DO NOT PROCEED WITH THIS ASSEMBLY PAYLOAD -- not all detected issues are permitted."
+
+
 @cli.command("release:gen-payload", short_help="Mirror release images to quay and release-controller")
 @click.option("--is-name", metavar="NAME", required=False,
               help="ImageStream .metadata.name value. For example '4.2-art-latest'")
@@ -340,8 +343,7 @@ class GenPayloadCli:
         if self.payload_permitted:
             exit(0)
 
-        red_print("DO NOT PROCEED WITH THIS ASSEMBLY PAYLOAD -- not all detected issues are permitted.",
-                  file=sys.stderr)
+        red_print(UNVIABLE_ASSEMBLY_ERROR_MSG, file=sys.stderr)
         exit(1)
 
     def validate_parameters(self):

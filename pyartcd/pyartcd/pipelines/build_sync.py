@@ -6,23 +6,23 @@ import re
 import click
 import yaml
 from opentelemetry import trace
+from ghapi.all import GhApi
 
 from artcommonlib import rhcos, redis
 from artcommonlib.arch_util import go_suffix_for_arch
 from artcommonlib.exectools import limit_concurrency
 from artcommonlib.release_util import SoftwareLifecyclePhase
 from artcommonlib.util import split_git_url
+from artcommonlib.telemetry import start_as_current_span_async
+from artcommonlib.redis import RedisError
 from artcommonlib import exectools
 from pyartcd.cli import cli, pass_runtime, click_coroutine
 from pyartcd.oc import registry_login
-from artcommonlib.redis import RedisError
 from pyartcd.runtime import Runtime, GroupRuntime
-from artcommonlib.telemetry import start_as_current_span_async
-from pyartcd import constants, locks
-from artcommonlib import exectools
+from pyartcd import constants, locks, jenkins
 from pyartcd.util import branch_arches
 from pyartcd.jenkins import get_build_url
-from ghapi.all import GhApi
+from pyartcd.pipelines.release_gen_payload import UNVIABLE_ASSEMBLY_ERROR_MSG
 
 
 TRACER = trace.get_tracer(__name__)
@@ -354,7 +354,13 @@ class BuildSyncPipeline:
             cmd.extend([f'--exclude-arch {arch}' for arch in self.exclude_arches])
         if self.runtime.dry_run:
             cmd.extend(['--skip-gc-tagging', '--moist-run'])
-        await exectools.cmd_assert_async(cmd, env=os.environ.copy())
+        rc, _, stderr = await exectools.cmd_gather_async(cmd, check=False, env=os.environ.copy())
+        if rc != 0:
+            if UNVIABLE_ASSEMBLY_ERROR_MSG in stderr:
+                jenkins.update_title(' [UNVIABLE]')
+            else:
+                jenkins.update_title(' [FAILED]')
+            raise ChildProcessError(stderr)
 
         # Populate CI imagestreams
         await self._populate_ci_imagestreams()

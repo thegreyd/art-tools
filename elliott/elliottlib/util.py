@@ -522,7 +522,7 @@ async def get_nvrs_from_payload(pullspec_or_imagestream, rhcos_images, logger=No
     if is_pullspec:
         release_export_cmd = f'oc adm release info {pullspec_or_imagestream} -o json'
     else:
-        release_export_cmd = f'oc -n ocp -o json get is/{pullspec_or_imagestream}'
+        release_export_cmd = f'oc -o json get is/{pullspec_or_imagestream}'
 
     rc, stdout, stderr = exectools.cmd_gather(release_export_cmd)
     if rc != 0:

@@ -216,7 +216,7 @@ class KonfluxImageBuilder:
         return group_name.replace(".", "-")
 
     @staticmethod
-    def get_component_name(application_name: str, image_name):
+    def get_component_name(application_name: str, image_name: str):
         # Openshift doesn't allow dots or underscores in any of its fields, so we replace them with dashes
         name = f"{application_name}-{image_name}".replace(".", "-").replace("_", "-")
         # 'openshift-4-18-ose-installer-terraform' -> 'ose-4-18-ose-installer-terraform'

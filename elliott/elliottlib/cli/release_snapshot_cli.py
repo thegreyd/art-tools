@@ -82,10 +82,13 @@ class CreateSnapshotCli:
         created = await self._konflux_client._create(snapshot_obj)
         print(created)
 
+    @staticmethod
+    def get_timestamp():
+        return datetime.strftime(datetime.now(tz=timezone.utc), "%Y%m%d%H%M")
+
     async def new_snapshot(self, build_records) -> dict:
         major, minor = self.runtime.get_major_minor()
-        timestamp = datetime.strftime(datetime.now(tz=timezone.utc), "%Y%m%d%H%M")
-        snapshot_name = f"ose-{major}-{minor}-{timestamp}"
+        snapshot_name = f"ose-{major}-{minor}-{self.get_timestamp()}"
         application_name = KonfluxImageBuilder.get_application_name(self.runtime.group)
 
         # make sure application exists

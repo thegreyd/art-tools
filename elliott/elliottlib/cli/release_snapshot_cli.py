@@ -174,11 +174,11 @@ def release_snapshot_cli():
     help="File to read builds from, `-` to read from STDIN.",
     type=click.File("rt"),
 )
-@click.option('--dry-run', is_flag=True, help='Do not actually create the snapshot, just print what would be done.')
+@click.option('--apply', is_flag=False, help='Create the snapshot in cluster. By default just print')
 @click.pass_obj
 @click_coroutine
 async def new_snapshot_cli(runtime: Runtime, konflux_kubeconfig, konflux_context, konflux_namespace,
-                           builds_file, for_bundle, builds, dry_run):
+                           builds_file, for_bundle, builds, apply):
     """
     Create a new Konflux Snapshot in the given namespace for the given builds
 
@@ -188,11 +188,17 @@ async def new_snapshot_cli(runtime: Runtime, konflux_kubeconfig, konflux_context
     if bool(builds) and bool(builds_file):
         raise click.BadParameter("Use only one of --build or --builds-file")
 
+    if not konflux_kubeconfig:
+        konflux_kubeconfig = os.environ.get('KONFLUX_SA_KUBECONFIG')
+
+    if not konflux_kubeconfig:
+        raise ValueError(f"Must pass kubeconfig using --konflux-kubeconfig or KONFLUX_SA_KUBECONFIG env var")
+
     if builds_file:
         if builds_file == "-":
             builds_file = sys.stdin
         builds = [line.strip() for line in builds_file.readlines()]
 
     pipeline = CreateSnapshotCli(runtime, konflux_kubeconfig, konflux_context, konflux_namespace,
-                                 for_bundle, builds, dry_run)
+                                 for_bundle, builds, dry_run = not apply)
     await pipeline.run()

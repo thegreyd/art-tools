@@ -15,6 +15,10 @@ import gitlab
 import semver
 from artcommonlib import exectools, git_helper
 from artcommonlib.assembly import AssemblyTypes, assembly_group_config
+from artcommonlib.git_helper import run_git_async, gather_git_async
+from artcommonlib.model import Model
+from artcommonlib import exectools
+from artcommonlib.util import new_roundtrip_yaml_handler, convert_remote_git_to_ssh
 from artcommonlib.constants import SHIPMENT_DATA_URL_TEMPLATE
 from artcommonlib.model import Model
 from artcommonlib.util import convert_remote_git_to_ssh, new_roundtrip_yaml_handler
@@ -41,13 +45,16 @@ class PrepareReleaseKonfluxPipeline:
         runtime: Runtime,
         group: Optional[str],
         assembly: Optional[str],
-        build_data_path: Optional[str],
+        build_data_url: Optional[str],
         target_shipment_repo_url: Optional[str],
     ) -> None:
-        self.group_runtime = None
         self.runtime = runtime
         self.assembly = assembly
         self.release_name = None
+        self.product = None
+        self.group = group
+        self.group_config = None
+        self.releases_config = None
         self._slack_client = slack_client
 
         self.build_data_path = (
@@ -74,12 +81,10 @@ class PrepareReleaseKonfluxPipeline:
                 f"Invalid shipment data URL: {self.target_shipment_data_url} or {self.source_shipment_data_url}. Must be in {self.gitlab_url}"
             )
 
-        group_match = re.fullmatch(r"openshift-(\d+).(\d+)", group)
+        group_match = re.fullmatch(r"openshift-(\d+).(\d+)", self.group)
         if not group_match:
             raise ValueError(f"Invalid group name: {group}")
-        self.group = group
         self.release_version = (int(group_match[1]), int(group_match[2]), 0)
-
         self.application = KonfluxImageBuilder.get_application_name(self.group)
 
         if self.assembly == "stream":
@@ -90,15 +95,15 @@ class PrepareReleaseKonfluxPipeline:
         self.elliott_working_dir = self.working_dir / "elliott-working"
 
         group_param = f'--group={group}'
-        if self.build_data_gitref:
-            group_param += f'@{self.build_data_gitref}'
+        if self.source_build_data_branch:
+            group_param += f'@{self.source_build_data_branch}'
 
         self._elliott_base_command = [
             'elliott',
             group_param,
             f'--assembly={self.assembly}',
             f'--working-dir={self.elliott_working_dir}',
-            f'--data-path={self.build_data_path}',
+            f'--data-path={self.source_build_data_url}',
         ]
         self._build_repo_dir = self.working_dir / "ocp-build-data-push"
 
@@ -107,9 +112,9 @@ class PrepareReleaseKonfluxPipeline:
         shutil.rmtree(self._build_repo_dir, ignore_errors=True)
         shutil.rmtree(self.elliott_working_dir, ignore_errors=True)
 
-        group_config = await self.load_group_config()
-        releases_config = await self.load_releases_config()
-        if releases_config.get("releases", {}).get(self.assembly) is None:
+        self.group_config = await self._load_group_config()
+        self.releases_config = await self._load_releases_config()
+        if self.releases_config.get("releases", {}).get(self.assembly) is None:
             raise ValueError(f"Assembly not found: {self.assembly}")
 
         assembly_type = get_assembly_type(releases_config, self.assembly)
@@ -126,11 +131,16 @@ class PrepareReleaseKonfluxPipeline:
         self.release_name = get_release_name_for_assembly(self.group, releases_config, self.assembly)
         self.release_version = semver.VersionInfo.parse(self.release_name).to_tuple()
 
-        group_config = assembly_group_config(Model(releases_config), self.assembly, Model(group_config)).primitive()
+        group_config = assembly_group_config(Model(self.releases_config), self.assembly, Model(self.group_config)).primitive()
+        self.product = group_config.get("product", "ocp")
 
+        await self.prepare_shipment()
+
+
+    async def prepare_shipment(self):    
         # restrict to only one shipment for now
-        shipment_key = next(k for k in group_config.keys() if k.startswith("shipments"))
-        shipments = group_config.get(shipment_key, []).copy()
+        shipment_key = next(k for k in self.group_config.keys() if k.startswith("shipments"))
+        shipments = self.group_config.get(shipment_key, []).copy()
         if len(shipments) != 1:
             raise ValueError("Operation not supported: shipments should have atleast and only one entry (for now)")
 
@@ -177,12 +187,14 @@ class PrepareReleaseKonfluxPipeline:
             shipment_config["url"] = shipment_mr_url
             # await self._slack_client.say_in_thread(f"Shipment MR created: {shipment_mr_url}")
             await self.update_build_data(shipments)
+        else:
+            _LOGGER.info("Shipment MR already exists. Nothing to do: %s", shipment_url)
 
     @cached_property
     def _errata_api(self):
         return AsyncErrataAPI()
 
-    async def load_group_config(self) -> Dict:
+    async def _load_group_config(self) -> Dict:
         repo = self._build_repo_dir
         if not repo.exists():
             await self.clone_build_data(repo)
@@ -190,7 +202,7 @@ class PrepareReleaseKonfluxPipeline:
             content = await f.read()
         return yaml.load(content)
 
-    async def load_releases_config(self) -> Optional[None]:
+    async def _load_releases_config(self) -> Optional[None]:
         repo = self._build_repo_dir
         if not repo.exists():
             await self.clone_build_data(repo)
@@ -220,17 +232,17 @@ class PrepareReleaseKonfluxPipeline:
         await self.clone_shipment_data(shipment_repo_dir)
 
         # Define target directory relative to repo root
-        relative_target_dir = Path("shipment") / "ocp" / self.group / self.application / env
+        relative_target_dir = Path("shipment") / self.product / self.group / self.application / env
         target_dir = shipment_repo_dir / relative_target_dir
         target_dir.mkdir(parents=True, exist_ok=True)
 
         # Create branch name
-        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+        timestamp = datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M%S')
         source_branch = f"prepare-shipment-{self.assembly}-{timestamp}"
         target_branch = "main"
 
         # Create and checkout branch
-        await git_helper.run_git_async(["-C", str(shipment_repo_dir), "checkout", "-b", source_branch])
+        await run_git_async(["-C", str(shipment_repo_dir), "checkout", "-b", source_branch])
 
         # Create shipment files
         added_files = []
@@ -246,18 +258,18 @@ class PrepareReleaseKonfluxPipeline:
             added_files.append(str(filepath.relative_to(shipment_repo_dir)))
 
         # Commit changes
-        await git_helper.run_git_async(["-C", str(shipment_repo_dir), "add"] + added_files)
+        await run_git_async(["-C", str(shipment_repo_dir), "add"] + added_files)
         commit_message = f"Add shipment configurations for {self.assembly}"
-        await git_helper.run_git_async(["-C", str(shipment_repo_dir), "commit", "-m", commit_message])
+        await run_git_async(["-C", str(shipment_repo_dir), "commit", "-m", commit_message])
 
         # Push branch
         if not self.dry_run:
             _LOGGER.info("Pushing branch %s to origin...", source_branch)
-            await git_helper.run_git_async(["-C", str(shipment_repo_dir), "push", "-u", "origin", source_branch])
+            await run_git_async(["-C", str(shipment_repo_dir), "push", "-u", "origin", source_branch])
         else:
             _LOGGER.warning("Would have pushed branch %s to origin", source_branch)
             _LOGGER.warning("Would have created MR with title: %s", commit_message)
-            return "https://gitlab.cee.redhat.com/placeholder/placeholder/-/merge_requests/placeholder"
+            return f"{self.gitlab_url}/placeholder/placeholder/-/merge_requests/placeholder"
 
         gl = gitlab.Gitlab(self.gitlab_url, private_token=self.gitlab_token)
         gl.auth()
@@ -287,7 +299,6 @@ class PrepareReleaseKonfluxPipeline:
         return mr_url
 
     async def clone_repo(self, local_path: Path, repo_url: str, branch: str):
-        repo_ssh_url = convert_remote_git_to_ssh(repo_url)
         args = [
             "-C",
             str(self.working_dir),
@@ -305,9 +316,7 @@ class PrepareReleaseKonfluxPipeline:
             )
 
     async def clone_build_data(self, local_path: Path):
-        repo_url = self.build_data_path or self.runtime.config["build_config"]["ocp_build_data_repo_push_url"]
-        branch = self.build_data_gitref or self.group
-        return await self.clone_repo(local_path, repo_url, branch)
+        return await self.clone_repo(local_path, self.source_build_data_url, self.source_build_data_branch)
 
     async def clone_shipment_data(self, local_path: Path):
         branch = "main"
@@ -325,17 +334,15 @@ class PrepareReleaseKonfluxPipeline:
             repo_url,
             str(local_path),
         ]
-        await git_helper.run_git_async(args)
+        await run_git_async(args)
 
-    async def update_build_data(self, shipments: List[Dict]):
+    async def update_build_data(self, shipments: List[Dict]) -> bool:
+        repo_ssh_url = convert_remote_git_to_ssh(repo_url)
+        if repo_ssh_url != repo_url:
+            await run_git_async(["-C", str(local_path), "remote", "set-url", "--push", "origin", repo_ssh_url])
+        
         repo = self._build_repo_dir
-        if not repo.exists():
-            await self.clone_build_data(repo)
-
-        async with aiofiles.open(repo / "releases.yml", "r") as f:
-            old = await f.read()
-        releases_config = yaml.load(old)
-        group_config = releases_config["releases"][self.assembly].setdefault("assembly", {}).setdefault("group", {})
+        group_config = self.releases_config["releases"][self.assembly].setdefault("assembly", {}).setdefault("group", {})
 
         # Assembly key names are not always exact, they can end in special chars like !,?,-
         # to indicate special inheritance rules. So respect those
@@ -344,28 +351,35 @@ class PrepareReleaseKonfluxPipeline:
         group_config[shipment_key] = shipments
 
         out = StringIO()
-        yaml.dump(releases_config, out)
+        yaml.dump(self.releases_config, out)
         async with aiofiles.open(repo / "releases.yml", "w") as f:
             await f.write(out.getvalue())
 
-        cmd = ["git", "-C", str(repo), "--no-pager", "diff"]
-        await exectools.cmd_assert_async(cmd)
-        cmd = ["git", "-C", str(repo), "add", "."]
-        await exectools.cmd_assert_async(cmd)
-        cmd = ["git", "-C", str(repo), "diff-index", "--quiet", "HEAD"]
-        rc = await exectools.cmd_assert_async(cmd, check=False)
+        # Dump diff to stdout
+        await run_git_async(["-C", str(repo), "--no-pager", "diff"])
+        
+        # Add release config to git
+        await run_git_async(["-C", str(repo), "add", "releases.yml"])
+        
+        # Make sure there are changes to commit
+        rc = await gather_git_async(["-C", str(repo), "diff-index", "--quiet", "HEAD"], check=False)
         if rc == 0:
-            _LOGGER.warning("No changes in releases.yml")
+            _LOGGER.info("No changes in releases.yml")
             return False
-        cmd = ["git", "-C", str(repo), "commit", "-m", f"Prepare konflux release {self.release_name}"]
-        await exectools.cmd_assert_async(cmd)
-        if not self.dry_run:
-            _LOGGER.info("Pushing changes to upstream...")
-            cmd = ["git", "-C", str(repo), "push", "origin", self.group]
-            await exectools.cmd_assert_async(cmd)
-        else:
-            _LOGGER.warning("Would have run %s", cmd)
-            _LOGGER.warning("Would have pushed changes to upstream")
+        
+        # Commit changes
+        await run_git_async(["-C", str(repo), "commit", "-m", f"Prepare konflux release {self.release_name}"])
+        
+        # Push changes to a new branch
+        branch = f"prepare-release-konflux-{self.release_name}"
+        cmd = ["-C", str(repo), "push", "origin", branch]
+
+        if self.dry_run:
+            _LOGGER.info("Would have run cmd to push changes to upstream: %s", " ".join(cmd))
+            return True
+        
+        _LOGGER.info("Pushing changes to upstream...")
+        await run_git_async(cmd)
         return True
 
 
@@ -408,7 +422,7 @@ async def prepare_release(
             runtime=runtime,
             group=group,
             assembly=assembly,
-            build_data_path=build_data_path,
+            build_data_url=build_data_path,
             target_shipment_repo_url=target_shipment_repo_url,
         )
         await pipeline.run()

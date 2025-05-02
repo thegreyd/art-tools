@@ -13,7 +13,7 @@ class TestAssemblyPinBuildsCli(IsolatedAsyncioTestCase):
                 "images": [],
                 "rpms": [],
             },
-            "group": {}
+            "group": {},
         })
 
         self.runtime = MagicMock(
@@ -25,9 +25,9 @@ class TestAssemblyPinBuildsCli(IsolatedAsyncioTestCase):
         self.runtime.get_releases_config.return_value = Model({
             "releases": {
                 self.runtime.assembly: {
-                    "assembly": self.assembly_config
-                }
-            }
+                    "assembly": self.assembly_config,
+                },
+            },
         })
         self.runtime.konflux_db = MagicMock()
 
@@ -89,19 +89,19 @@ class TestAssemblyPinBuildsCli(IsolatedAsyncioTestCase):
                 "images": [{
                     "distgit_key": "image1",
                     "metadata": {
-                        "is": {"nvr": self.image_nvr}
+                        "is": {"nvr": self.image_nvr},
                     },
-                    "why": self.why
+                    "why": self.why,
                 }],
                 "rpms": [{
                     "distgit_key": "rpm1",
                     "metadata": {
-                        "is": {"el8": self.rpm_nvr}
+                        "is": {"el8": self.rpm_nvr},
                     },
-                    "why": self.why
-                }]
+                    "why": self.why,
+                }],
             },
-            "group": {}
+            "group": {},
         }
         self.assertEqual(changed, True)
         self.assertEqual(out["releases"][self.runtime.assembly]["assembly"], expected_assembly_config)
@@ -113,26 +113,26 @@ class TestAssemblyPinBuildsCli(IsolatedAsyncioTestCase):
                 "images": [{
                     "distgit_key": "image1",
                     "metadata": {
-                        "is": {"nvr": self.image_nvr}
+                        "is": {"nvr": self.image_nvr},
                     },
-                    "why": self.why
+                    "why": self.why,
                 }],
                 "rpms": [{
                     "distgit_key": "rpm1",
                     "metadata": {
-                        "is": {"el8": self.rpm_nvr}
+                        "is": {"el8": self.rpm_nvr},
                     },
-                    "why": self.why
-                }]
+                    "why": self.why,
+                }],
             },
-            "group": {}
+            "group": {},
         }
         self.runtime.get_releases_config.return_value = Model({
             "releases": {
                 self.runtime.assembly: {
-                    "assembly": assembly_config
-                }
-            }
+                    "assembly": assembly_config,
+                },
+            },
         })
         cli = AssemblyPinBuildsCli(
             runtime=self.runtime,
@@ -165,19 +165,19 @@ class TestAssemblyPinBuildsCli(IsolatedAsyncioTestCase):
                 "images": [{
                     "distgit_key": "image1",
                     "metadata": {
-                        "is": {"nvr": self.image_nvr}
+                        "is": {"nvr": self.image_nvr},
                     },
-                    "why": self.why
+                    "why": self.why,
                 }],
                 "rpms": [{
                     "distgit_key": "rpm1",
                     "metadata": {
-                        "is": {"el8": self.rpm_nvr}
+                        "is": {"el8": self.rpm_nvr},
                     },
-                    "why": self.why
-                }]
+                    "why": self.why,
+                }],
             },
-            "group": {}
+            "group": {},
         }
         self.assertEqual(changed, True)
         self.assertEqual(out["releases"][self.runtime.assembly]["assembly"], expected_assembly_config)
@@ -227,17 +227,17 @@ class TestAssemblyPinBuildsCli(IsolatedAsyncioTestCase):
         expected_assembly_config = {
             "members": {
                 "images": [],
-                "rpms": []
+                "rpms": [],
             },
             "group": {},
             "rhcos": {
                 "machine-os-content": {
                     "images": {
                         "x86_64": "registry.example.com/rhel-coreos/machine-os-content@sha256:abc123",
-                        "aarch64": "registry.example.com/rhel-coreos/machine-os-content@sha256:abc123"
-                    }
-                }
-            }
+                        "aarch64": "registry.example.com/rhel-coreos/machine-os-content@sha256:abc123",
+                    },
+                },
+            },
         }
         self.assertEqual(changed, True)
         self.assertEqual(out["releases"][self.runtime.assembly]["assembly"], expected_assembly_config)
@@ -258,17 +258,17 @@ class TestAssemblyPinBuildsCli(IsolatedAsyncioTestCase):
         expected_assembly_config = {
             "members": {
                 "images": [],
-                "rpms": []
+                "rpms": [],
             },
             "group": {
                 "dependencies": {
                     "rpms": [{
                         "el8": self.non_art_rpm_nvr,
                         "why": self.why,
-                        "non_gc_tag": "insert tag here if needed"
-                    }]
-                }
-            }
+                        "non_gc_tag": "insert tag here if needed",
+                    }],
+                },
+            },
         }
         self.assertEqual(changed, True)
         self.assertEqual(out["releases"][self.runtime.assembly]["assembly"], expected_assembly_config)
@@ -291,7 +291,7 @@ class TestAssemblyPinBuildsCli(IsolatedAsyncioTestCase):
             "group": self.runtime.group,
             "commitish": "commit_hash",
             "outcome": KonfluxBuildOutcome.SUCCESS.value,
-            "engine": self.runtime.build_system
+            "engine": self.runtime.build_system,
         })
         self.assertEqual(nvrs, [self.image_nvr, self.rpm_nvr])
 
@@ -300,7 +300,7 @@ class TestAssemblyPinBuildsCli(IsolatedAsyncioTestCase):
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "merge_commit_sha": "abc123def456",
-            "base": {"ref": "release-4.18"}
+            "base": {"ref": "release-4.18"},
         }
         mock_requests_get.return_value = mock_response
 

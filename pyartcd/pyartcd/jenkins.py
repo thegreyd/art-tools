@@ -164,7 +164,7 @@ def set_build_description(build: Build, description: str):
         f'{build.baseurl}/submitDescription',
         params={
             'Submit': 'submit',
-            'description': description
+            'description': description,
         },
         data="",
         valid=[200]
@@ -246,7 +246,7 @@ def start_ocp4(build_version: str, assembly: str, rpm_list: list,
                image_list: list, comment_on_pr: bool, **kwargs) -> Optional[str]:
     params = {
         'BUILD_VERSION': build_version,
-        'ASSEMBLY': assembly
+        'ASSEMBLY': assembly,
     }
 
     # If any rpm/image changed, force a build with only changed sources
@@ -284,7 +284,7 @@ def start_ocp4_konflux(build_version: str, assembly: str, image_list: list,
                        limit_arches: list = None, **kwargs) -> Optional[str]:
     params = {
         'BUILD_VERSION': build_version,
-        'ASSEMBLY': assembly
+        'ASSEMBLY': assembly,
     }
 
     # Build only changed images or none
@@ -378,7 +378,7 @@ def start_build_microshift(build_version: str, assembly: str, dry_run: bool, **k
         params={
             'BUILD_VERSION': build_version,
             'ASSEMBLY': assembly,
-            'DRY_RUN': dry_run
+            'DRY_RUN': dry_run,
         },
         **kwargs
     )
@@ -398,7 +398,7 @@ def start_olm_bundle(build_version: str, assembly: str, operator_nvrs: list,
             'ASSEMBLY': assembly,
             'DOOZER_DATA_PATH': doozer_data_path,
             'DOOZER_DATA_GITREF': doozer_data_gitref,
-            'OPERATOR_NVRS': ','.join(operator_nvrs)
+            'OPERATOR_NVRS': ','.join(operator_nvrs),
         },
         **kwargs
     )
@@ -419,7 +419,7 @@ def start_olm_bundle_konflux(
             'ASSEMBLY': assembly,
             'DOOZER_DATA_PATH': doozer_data_path,
             'DOOZER_DATA_GITREF': doozer_data_gitref,
-            'OPERATOR_NVRS': ','.join(operator_nvrs)
+            'OPERATOR_NVRS': ','.join(operator_nvrs),
         },
         **kwargs
     )
@@ -429,7 +429,7 @@ def start_sync_for_ci(version: str, **kwargs):
     return start_build(
         job=Jobs.SYNC_FOR_CI,
         params={
-            'ONLY_FOR_VERSION': version
+            'ONLY_FOR_VERSION': version,
         },
         **kwargs
     )
@@ -441,7 +441,7 @@ def start_microshift_sync(version: str, assembly: str, dry_run: bool, **kwargs):
         params={
             'BUILD_VERSION': version,
             'ASSEMBLY': assembly,
-            'DRY_RUN': dry_run
+            'DRY_RUN': dry_run,
         },
         **kwargs
     )
@@ -453,7 +453,7 @@ def start_build_microshift_bootc(version: str, assembly: str, dry_run: bool, **k
         params={
             'BUILD_VERSION': version,
             'ASSEMBLY': assembly,
-            'DRY_RUN': dry_run
+            'DRY_RUN': dry_run,
         },
         **kwargs
     )

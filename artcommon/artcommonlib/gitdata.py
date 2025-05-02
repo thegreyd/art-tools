@@ -45,7 +45,7 @@ class DataObj(object):
         result = {
             'key': self.key,
             'path': self.path,
-            'data': self.data
+            'data': self.data,
         }
         return str(result)
 

@@ -38,7 +38,7 @@ class CgitAtomFeedEntry(NamedTuple):
 #
 DISTGIT_TYPES = {
     'image': ImageDistGitRepo,
-    'rpm': RPMDistGitRepo
+    'rpm': RPMDistGitRepo,
 }
 
 

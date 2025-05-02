@@ -1133,10 +1133,10 @@ def distgit_config_template(url):
         },
         "name": dfp.labels['name'],
         "from": {
-            "image": dfp.baseimage
+            "image": dfp.baseimage,
         },
         "labels": {},
-        "owners": []
+        "owners": [],
     }
 
     branch = url[url.index("?h=") + 3:]
@@ -1155,7 +1155,7 @@ def distgit_config_template(url):
         'architecture',
         'io.k8s.display-name',
         'io.k8s.description',
-        'io.openshift.tags'
+        'io.openshift.tags',
     ]
 
     for ml in managed_labels:

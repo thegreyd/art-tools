@@ -95,7 +95,7 @@ class BuildMicroShiftBootcPipeline:
             "skopeo",
             "inspect",
             f"docker://{bootc_build.image_pullspec}",
-            "--raw"
+            "--raw",
         ]
         _, out, _ = await exectools.cmd_gather_async(cmd)
         manifest_list = json.loads(out)
@@ -305,7 +305,7 @@ class BuildMicroShiftBootcPipeline:
             "beta:images:konflux:build",
             "--image-repo", KONFLUX_DEFAULT_IMAGE_REPO,
             "--konflux-kubeconfig", kubeconfig,
-            "--konflux-namespace", "ocp-art-tenant"
+            "--konflux-namespace", "ocp-art-tenant",
         ]
         if self.runtime.dry_run:
             build_cmd.append("--dry-run")

@@ -105,7 +105,7 @@ async def load_releases_config(group: str, data_path: str = constants.OCP_BUILD_
         f'--data-path={data_path}',
         f'--group={group}',
         'config:read-releases',
-        '--yaml'
+        '--yaml',
     ]
 
     try:
@@ -126,7 +126,7 @@ async def load_assembly(group: str, assembly: str, key: str = '',
         f'--assembly={assembly}',
         'config:read-assembly',
         '--yaml',
-        key
+        key,
     ]
 
     try:
@@ -177,7 +177,7 @@ async def kinit():
             '-k',
             '-t',
             keytab_file,
-            keytab_user
+            keytab_user,
         ]
         await exectools.cmd_assert_async(cmd)
     else:
@@ -257,7 +257,7 @@ async def get_freeze_automation(version: str, doozer_data_path: str = constants.
         group_param,
         'config:read-group',
         '--default=no',
-        'freeze_automation'
+        'freeze_automation',
     ]
     _, out, _ = await exectools.cmd_gather_async(cmd)
     return out.strip()

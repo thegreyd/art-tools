@@ -26,7 +26,7 @@ class TestUtil(IsolatedAsyncioTestCase):
             'aarch64': 'registry.ci.openshift.org/ocp-arm64/release-arm64:4.14.0-0.nightly-arm64-2023-09-15-082316',
             'ppc64le': 'registry.ci.openshift.org/ocp-ppc64le/release-ppc64le:4.14.0-0.nightly-ppc64le-2023-09-15-125921',
             's390x': 'registry.ci.openshift.org/ocp-s390x/release-s390x:4.14.0-0.nightly-s390x-2023-09-15-114441',
-            'x86_64': 'registry.ci.openshift.org/ocp/release:4.14.0-0.nightly-2023-09-15-055234'
+            'x86_64': 'registry.ci.openshift.org/ocp/release:4.14.0-0.nightly-2023-09-15-055234',
         }
         self.assertEqual(util.nightlies_with_pullspecs(nightly_tags), expected)
 
@@ -187,16 +187,16 @@ class TestUtil(IsolatedAsyncioTestCase):
                 '4.11.1': {
                     'assembly': {
                         'basis': {'assembly': '4.11.0'},
-                    }
+                    },
                 },
                 '4.11.0': {
                     'assembly': {
                         'members': {
-                            'rpms': [{'distgit_key': 'foo', 'metadata': {'is': rpms}}]
-                        }
-                    }
-                }
-            }
+                            'rpms': [{'distgit_key': 'foo', 'metadata': {'is': rpms}}],
+                        },
+                    },
+                },
+            },
         }
         self.assertEqual(util.get_rpm_if_pinned_directly(releases_config, '4.11.0', 'foo'), rpms)
         self.assertEqual(util.get_rpm_if_pinned_directly(releases_config, '4.11.1', 'foo'), dict())

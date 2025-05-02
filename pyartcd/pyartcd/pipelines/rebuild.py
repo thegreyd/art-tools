@@ -183,7 +183,7 @@ class RebuildPipeline:
             "config:plashet",
             "--base-dir", str(base_dir),
             "--name", directory_name,
-            "--repo-subdir", "os"
+            "--repo-subdir", "os",
         ]
         for arch in arches:
             cmd.extend(["--arch", arch, signing_mode])
@@ -243,7 +243,7 @@ class RebuildPipeline:
             "config:plashet",
             "--base-dir", str(base_dir),
             "--name", directory_name,
-            "--repo-subdir", "os"
+            "--repo-subdir", "os",
         ]
         for arch in arches:
             cmd.extend(["--arch", arch, signing_mode])
@@ -308,7 +308,7 @@ class RebuildPipeline:
             "--perms",
             "--",
             f"{local_plashet_dir}",
-            f"{self.plashet_remote['host']}:{remote_dir}"
+            f"{self.plashet_remote['host']}:{remote_dir}",
         ]
         if self.runtime.dry_run:
             self.logger.warning("[DRY RUN] Would have run %s", cmd)
@@ -556,14 +556,14 @@ class RebuildPipeline:
                                 {
                                     "distgit_key": self.dg_key,
                                     "metadata": {
-                                        "is": is_entry
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                }
-            }
+                                        "is": is_entry,
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                },
+            },
         }
         return schema
 

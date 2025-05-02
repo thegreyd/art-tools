@@ -223,7 +223,7 @@ class KonfluxOlmBundleRebaser:
                     "internal_pullspec": old_pullspec,
                     "public_pullspec": new_pullspec,
                 } for name, (old_pullspec, new_pullspec, nvr) in operands.items()
-            }
+            },
         })
         async with aiofiles.open(oit_dir / 'olm_bundle_info.yaml', 'w') as f:
             await f.write(content)

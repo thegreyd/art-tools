@@ -354,7 +354,7 @@ class BuildSyncPipeline:
             cmd.append(f'--images={self.images}')
         cmd.extend([
             f'--working-dir={mirror_working}',
-            f'--data-path={self.data_path}'
+            f'--data-path={self.data_path}',
         ])
         group_param = f'--group=openshift-{self.version}'
         if self.doozer_data_gitref:
@@ -364,7 +364,7 @@ class BuildSyncPipeline:
         cmd.extend([
             'release:gen-payload',
             f'--output-dir={GEN_PAYLOAD_ARTIFACTS_OUT_DIR}',
-            '--apply'
+            '--apply',
         ])
         if self.emergency_ignore_issues:
             cmd.append('--emergency-ignore-issues')

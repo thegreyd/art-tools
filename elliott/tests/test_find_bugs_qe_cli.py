@@ -15,7 +15,7 @@ class FindBugsQETestCase(unittest.TestCase):
         flexmock(Runtime).should_receive("initialize").and_return(None)
         flexmock(Runtime).should_receive("get_major_minor").and_return(4, 6)
         flexmock(JIRABugTracker).should_receive("get_config").and_return({
-            'target_release': ['4.6.z'], 'server': "server"
+            'target_release': ['4.6.z'], 'server': "server",
         })
         client = flexmock()
         flexmock(client).should_receive("fields").and_return([])
@@ -29,7 +29,7 @@ class FindBugsQETestCase(unittest.TestCase):
         )
 
         flexmock(BugzillaBugTracker).should_receive("get_config").and_return({
-            'target_release': ['4.6.z'], 'server': "bugzilla.redhat.com"
+            'target_release': ['4.6.z'], 'server': "bugzilla.redhat.com",
         })
         flexmock(BugzillaBugTracker).should_receive("login").and_return(None)
         flexmock(BugzillaBugTracker).should_receive("search").and_return([bz_bug])

@@ -35,9 +35,9 @@ def unauthorized():
         'headers': {
             'www-authenticate': [{
                 'key': 'WWW-Authenticate',
-                'value': 'Basic'
+                'value': 'Basic',
             }],
-        }
+        },
     }
 
 
@@ -48,9 +48,9 @@ def redirect(uri: str, code: int = 302, description="Found"):
         'headers': {
             "location": [{
                 'key': 'Location',
-                "value": str(uri)
+                "value": str(uri),
             }],
-        }
+        },
     }
 
 

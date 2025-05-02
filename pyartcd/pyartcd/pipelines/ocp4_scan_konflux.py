@@ -94,13 +94,13 @@ class Ocp4ScanPipeline:
             f'--data-path={self.data_path}',
             f'--group={group_param}',
             f'--assembly={self.assembly}',
-            '--build-system=konflux'
+            '--build-system=konflux',
         ]
         if self.image_list:
             cmd.append(f'--images={self.image_list}')
         cmd.extend([
             'beta:config:konflux:scan-sources',
-            '--yaml'
+            '--yaml',
         ])
         if self.runtime.dry_run:
             cmd.append('--dry-run')

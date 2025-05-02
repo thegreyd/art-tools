@@ -441,7 +441,7 @@ class TestGenPayloadCli(IsolatedAsyncioTestCase):
         self.assertEqual(lines, [
             "eggs_manifest_src=eggs_manifest_pullspec",
             "eggs_src=eggs_pullspec",
-            "spam_src=spam_pullspec"
+            "spam_src=spam_pullspec",
         ])  # rhcos notably absent from mirroring
 
     @patch("doozerlib.cli.release_gen_payload.PayloadGenerator.build_payload_istag")
@@ -482,7 +482,7 @@ class TestGenPayloadCli(IsolatedAsyncioTestCase):
                 rhcos=dict(s390x=payload_entries["rhcos"]),
                 spam=dict(),  # embargoed
                 eggs=dict(s390x=payload_entries["eggs"]),
-            )
+            ),
         })
         gpcli.write_imagestream_artifact_file.assert_awaited_once_with(
             "ocp-s390x", "release-s390x", ["rhcos", "eggs"], True)
@@ -502,7 +502,7 @@ class TestGenPayloadCli(IsolatedAsyncioTestCase):
                 rhcos=dict(s390x=payload_entries["rhcos"]),
                 spam=dict(),  # embargoed
                 eggs=dict(s390x=payload_entries["eggs"]),
-            )
+            ),
         })
         gpcli.write_imagestream_artifact_file.assert_awaited_once_with(
             "ocp-s390x-priv", "release-s390x-priv", ["rhcos", "spam", "eggs"], True)
@@ -565,7 +565,7 @@ spec:
         mar_mock.side_effect = lambda apiobj, func, *_: func(apiobj)
         # return a stub inconsistency annotation
         binc_mock.side_effect = lambda issues: {
-            "release.openshift.io/inconsistency": ",".join(str(it) for it in issues)
+            "release.openshift.io/inconsistency": ",".join(str(it) for it in issues),
         }
 
         istream_apiobj = Mock(oc.APIObject, model=oc.Model(dict(

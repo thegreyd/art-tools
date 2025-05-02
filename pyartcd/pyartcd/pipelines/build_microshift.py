@@ -264,7 +264,7 @@ class BuildMicroShiftPipeline:
             "find-builds",
             "-k", "rpm",
             "--member-only",
-            "--use-default-advisory", "microshift"
+            "--use-default-advisory", "microshift",
         ]
         if self.runtime.dry_run:
             cmd.append("--dry-run")
@@ -279,7 +279,7 @@ class BuildMicroShiftPipeline:
             "--assembly", self.assembly,
             "find-bugs:sweep",
             "--permissive",  # this is so we don't error out on non-microshift bugs
-            "--use-default-advisory", "microshift"
+            "--use-default-advisory", "microshift",
         ]
         if self.runtime.dry_run:
             cmd.append("--dry-run")
@@ -293,7 +293,7 @@ class BuildMicroShiftPipeline:
             "--group", self.group,
             "--assembly", self.assembly,
             "attach-cve-flaws",
-            "--use-default-advisory", "microshift"
+            "--use-default-advisory", "microshift",
         ]
         if self.runtime.dry_run:
             cmd.append("--dry-run")
@@ -308,7 +308,7 @@ class BuildMicroShiftPipeline:
             "--assembly", self.assembly,
             "verify-attached-bugs",
             "--verify-flaws",
-            str(advisory_id)
+            str(advisory_id),
         ]
         try:
             await exectools.cmd_assert_async(cmd, env=self._elliott_env_vars)
@@ -333,7 +333,7 @@ class BuildMicroShiftPipeline:
             "change-state",
             "-s", "QE",
             "--from", "NEW_FILES",
-            "--use-default-advisory", "microshift"
+            "--use-default-advisory", "microshift",
         ]
         if self.runtime.dry_run:
             cmd.append("--dry-run")

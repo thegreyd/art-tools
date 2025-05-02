@@ -14,7 +14,7 @@ class TestAttachCVEFlawsCLI(unittest.IsolatedAsyncioTestCase):
             'synopsis': 'some synopsis',
             'description': 'some description with {CVES}',
             'topic': "some topic {IMPACT}",
-            'solution': 'some solution'
+            'solution': 'some solution',
         }
         advisory = Mock(
             errata_type="RHBA",
@@ -26,7 +26,7 @@ class TestAttachCVEFlawsCLI(unittest.IsolatedAsyncioTestCase):
 
         flaw_bugs = [
             Mock(alias=['CVE-2022-123'], severity='urgent', summary='CVE-2022-123 foo'),
-            Mock(alias=['CVE-2022-456'], severity='high', summary='CVE-2022-456 bar')
+            Mock(alias=['CVE-2022-456'], severity='high', summary='CVE-2022-456 bar'),
         ]
 
         attach_cve_flaws_cli.get_updated_advisory_rhsa(
@@ -73,12 +73,12 @@ class TestAttachCVEFlawsCLI(unittest.IsolatedAsyncioTestCase):
                     "a-1.0.0-1.el7": {},
                     "e-1.0.0-1.el7": {},
                     "f-1.0.0-1.el7": {},
-                }
+                },
             }
         )
         errata_api.get_builds_flattened.return_value = [
             "a-1.0.0-1.el8", "b-1.0.0-1.el8", "c-1.0.0-1.el8", "d-1.0.0-1.el8",
-            "a-1.0.0-1.el7", "e-1.0.0-1.el7", "f-1.0.0-1.el7"
+            "a-1.0.0-1.el7", "e-1.0.0-1.el7", "f-1.0.0-1.el7",
         ]
         tracker_flaws = {
             1: [101, 103],

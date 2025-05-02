@@ -791,7 +791,7 @@ def create_batch(release_version, release_date):
         "release_name": "RHOSE ASYNC - AUTO",
         "release_date": release_date,
         "description": f"OCP {release_version}",
-        "is_active": True
+        "is_active": True,
     }
     response = ErrataConnector()._post("/api/v1/batches", json=data)
     if response.status_code != requests.codes.created:

@@ -553,8 +553,8 @@ def oc_image_info(
             'auths': {
                 pullspec.split('/')[0]: {
                     'auth': auth,
-                }
-            }
+                },
+            },
         }))
         registry_config_file.flush()
         return run_oc(auth_file=registry_config_file.name)
@@ -662,8 +662,8 @@ async def oc_image_info_async(
             'auths': {
                 pullspec.split('/')[0]: {
                     'auth': auth,
-                }
-            }
+                },
+            },
         }))
         registry_config_file.flush()
         return await run_oc(auth_file=registry_config_file.name)

@@ -22,7 +22,7 @@ class AdvisoryImagesTestCase(unittest.TestCase):
             constants.ELLIOTT_CMD
             + [
                 "--assembly=test",
-                "advisory-images", "--advisory", "65127"
+                "advisory-images", "--advisory", "65127",
             ]
         )
         self.assertIn("\n#########\n", out.decode("utf-8"))

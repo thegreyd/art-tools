@@ -57,10 +57,10 @@ image_build_metrics|elapsed_wait_minutes=1|elapsed_total_minutes=13|task_count=1
                         'alias': 'containers_openshift-enterprise-haproxy-router_router',
                         'branch': 'release-4.12',
                         'origin_url': 'https://github.com/openshift-priv/router',
-                        'path': '/workspace/containers_openshift-enterprise-haproxy-router_router'
+                        'path': '/workspace/containers_openshift-enterprise-haproxy-router_router',
                     },
-                    'source_dockerfile_subpath': 'images/router/haproxy/Dockerfile.rhel8'
-                }
+                    'source_dockerfile_subpath': 'images/router/haproxy/Dockerfile.rhel8',
+                },
             }
         )
 

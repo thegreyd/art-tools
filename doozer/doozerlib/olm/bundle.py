@@ -281,7 +281,7 @@ class OLMBundle(object):
         bundle_df.labels = {
             **bundle_df.labels,
             **self.redhat_delivery_tags,
-            **self.operator_framework_tags
+            **self.operator_framework_tags,
         }
         del (bundle_df.labels['release'])
 

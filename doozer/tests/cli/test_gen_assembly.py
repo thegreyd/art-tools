@@ -167,14 +167,14 @@ class TestGenPayloadCli(TestCase):
             gacli.release_pullspecs,
             {
                 'x86_64': 'registry.ci.openshift.org/ocp/release:4.13.0-0.nightly-2022-12-01-153811',
-                'aarch64': 'registry.ci.openshift.org/ocp-arm64/release-arm64:4.13.0-0.nightly-arm64-2022-12-05-151453'
+                'aarch64': 'registry.ci.openshift.org/ocp-arm64/release-arm64:4.13.0-0.nightly-arm64-2022-12-05-151453',
             }
         )
         self.assertEqual(
             gacli.reference_releases_by_arch,
             {
                 'x86_64': '4.13.0-0.nightly-2022-12-01-153811',
-                'aarch64': '4.13.0-0.nightly-arm64-2022-12-05-151453'
+                'aarch64': '4.13.0-0.nightly-arm64-2022-12-05-151453',
             }
         )
 
@@ -192,7 +192,7 @@ class TestGenPayloadCli(TestCase):
             runtime=runtime,
             nightlies=[
                 '4.13.0-0.nightly-2022-12-01-153811',
-                '4.13.0-0.nightly-2022-12-01-140621'
+                '4.13.0-0.nightly-2022-12-01-140621',
             ],
         )
         with self.assertRaises(ValueError):
@@ -249,7 +249,7 @@ class TestGenPayloadCli(TestCase):
             runtime=runtime,
             standards=[
                 '4.11.18-x86_64',
-                '4.11.19-x86_64'
+                '4.11.19-x86_64',
             ],
         )
         with self.assertRaises(ValueError):
@@ -304,7 +304,7 @@ class TestGenPayloadCli(TestCase):
         release_jira = "ART-123"
         runtime.get_releases_config.return_value = Model({'releases': {'rc.0': {'assembly': {'group': {
             'advisories': advisories,
-            'release_jira': release_jira
+            'release_jira': release_jira,
         }}}}})
         runtime.get_major_minor_fields.return_value = (4, 12)
         gacli = GenAssemblyCli(runtime=runtime, gen_assembly_name='rc.1')

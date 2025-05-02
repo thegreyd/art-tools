@@ -88,8 +88,8 @@ class TestGetNightlies(IsolatedAsyncioTestCase):
                         "name": "pod",
                         "annotations": {"io.openshift.build.commit.id": "pod-commit"},
                         "from": {"name": "pod-pullspec"},
-                    }
-                ]}}
+                    },
+                ]}},
             },
             name=name or "name", phase="Accepted", pullspec="nightly-pullspec",
         )

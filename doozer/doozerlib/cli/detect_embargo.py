@@ -233,7 +233,7 @@ def print_result_and_exit(embargoed_builds, embargoed_pullspecs, embargoed_relea
     :as_json: if true, print the result as a JSON document
     """
     out = {
-        "has_embargoes": bool(embargoed_builds)
+        "has_embargoes": bool(embargoed_builds),
     }
     if embargoed_builds:
         out["builds"] = embargoed_builds

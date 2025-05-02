@@ -46,17 +46,17 @@ class TestWatchReleaseCli(IsolatedAsyncioTestCase):
             'kind': KIND_RELEASE,
             'metadata': {
                 'name': release,
-                'namespace': self.konflux_config['namespace']
+                'namespace': self.konflux_config['namespace'],
             },
             'status': {
                 'conditions': [
                     {
                         'type': 'Released',
                         'status': 'True',
-                        'reason': 'Succeeded'
+                        'reason': 'Succeeded',
                     },
-                ]
-            }
+                ],
+            },
         }
         self.konflux_client.wait_for_release.return_value = Model(release)
 
@@ -83,17 +83,17 @@ class TestWatchReleaseCli(IsolatedAsyncioTestCase):
             'kind': KIND_RELEASE,
             'metadata': {
                 'name': release,
-                'namespace': self.konflux_config['namespace']
+                'namespace': self.konflux_config['namespace'],
             },
             'status': {
                 'conditions': [
                     {
                         'type': 'Released',
                         'status': 'True',
-                        'reason': 'Skipped'
+                        'reason': 'Skipped',
                     },
-                ]
-            }
+                ],
+            },
         }
         self.konflux_client.wait_for_release.return_value = Model(release)
 
@@ -120,17 +120,17 @@ class TestWatchReleaseCli(IsolatedAsyncioTestCase):
             'kind': KIND_RELEASE,
             'metadata': {
                 'name': release,
-                'namespace': self.konflux_config['namespace']
+                'namespace': self.konflux_config['namespace'],
             },
             'status': {
                 'conditions': [
                     {
                         'type': 'Released',
                         'status': 'False',
-                        'reason': 'Failed'
+                        'reason': 'Failed',
                     },
-                ]
-            }
+                ],
+            },
         }
         self.konflux_client.wait_for_release.return_value = Model(release)
 
@@ -226,9 +226,9 @@ class TestCreateReleaseCli(IsolatedAsyncioTestCase):
                         'solution': shipment_config.shipment.data.releaseNotes.solution,
                         'issues': {},
                         'cves': [],
-                    }
-                }
-            }
+                    },
+                },
+            },
         }
         self.konflux_client._create.return_value = Model(expected_release)
 
@@ -279,15 +279,15 @@ class TestCreateReleaseCli(IsolatedAsyncioTestCase):
                     },
                     "prod": {
                         "releasePlan": "test-prod-rp",
-                    }
+                    },
                 },
                 "snapshot": {
                     "name": "test-snapshot",
                     "spec": {
-                        "nvrs": ["test-nvr-1", "test-nvr-2"]
-                    }
-                }
-            }
+                        "nvrs": ["test-nvr-1", "test-nvr-2"],
+                    },
+                },
+            },
         }
         self.runtime.shipment_gitdata.load_yaml_file.return_value = shipment_config
 
@@ -329,15 +329,15 @@ class TestCreateReleaseCli(IsolatedAsyncioTestCase):
                     },
                     "prod": {
                         "releasePlan": "test-prod-rp",
-                    }
+                    },
                 },
                 "snapshot": {
                     "name": "test-snapshot",
                     "spec": {
-                        "nvrs": ["test-nvr-1", "test-nvr-2"]
-                    }
-                }
-            }
+                        "nvrs": ["test-nvr-1", "test-nvr-2"],
+                    },
+                },
+            },
         }
         self.runtime.shipment_gitdata.load_yaml_file.return_value = shipment_config
 

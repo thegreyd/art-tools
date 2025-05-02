@@ -748,7 +748,7 @@ class JIRABugTracker(BugTracker):
             self.field_target_version: [{'name': self.config.get('target_release')[0]}],  # Target Version
             'summary': bug_title,
             'labels': keywords,
-            'description': bug_description
+            'description': bug_description,
         }
         if noop:
             logger.info(f"Would have created JIRA Issue with status={target_status} and fields={fields}")

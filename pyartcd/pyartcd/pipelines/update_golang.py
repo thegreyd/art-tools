@@ -440,7 +440,7 @@ class UpdateGolangPipeline:
             "images:rebase",
             "--version", version,
             "--release", release,
-            "--message", f"bumping to {version}-{release}"
+            "--message", f"bumping to {version}-{release}",
         ]
         if not self.dry_run:
             cmd.append("--push")
@@ -455,7 +455,7 @@ class UpdateGolangPipeline:
             "--group", branch,
             "images:build",
             "--repo-type", "unsigned",
-            "--push-to-defaults"
+            "--push-to-defaults",
         ]
         if self.dry_run:
             cmd.append("--dry-run")

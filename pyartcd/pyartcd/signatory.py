@@ -94,7 +94,7 @@ class AsyncSignatory:
         # e.g. /queue/Consumer.openshift-art-bot.artcd.VirtualTopic.eng.robosignatory.art.sign
         consumer_queue = self.CONSUMER_QUEUE_TEMPLATE.format_map({
             "service_account": service_account,
-            "subscription": self.subscription_name
+            "subscription": self.subscription_name,
         })
         self._receiver = await self._umb.subscribe(consumer_queue, self.subscription_name)
         # Start a task to handle messages received from the consumer queue

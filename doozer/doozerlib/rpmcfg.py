@@ -111,7 +111,7 @@ class RPMMetadata(Metadata):
             "set_env": {
                 "PATH": path,
                 "BREW_EVENT": f'{self.runtime.brew_event}',
-                "BREW_TAG": f'{self.candidate_brew_tag()}'
+                "BREW_TAG": f'{self.candidate_brew_tag()}',
             },
             "runtime_assembly": self.runtime.assembly,
             "release_name": "",

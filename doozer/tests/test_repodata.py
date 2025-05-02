@@ -280,7 +280,7 @@ class TestOutdatedRPMFinder(IsolatedAsyncioTestCase):
         expected = [
             ('b-0:1.0.0-el8.x86_64', 'b-0:2.0.0-el8.x86_64', 'alfa-x86_64'),
             ('c-0:1.0.0-el8.x86_64', 'c-0:3.0.0-el8.x86_64', 'bravo-x86_64'),
-            ('d-0:1.0.0-el8.x86_64', 'd-0:2.0.0-el8.x86_64', 'bravo-x86_64')
+            ('d-0:1.0.0-el8.x86_64', 'd-0:2.0.0-el8.x86_64', 'bravo-x86_64'),
         ]
         self.assertEqual(actual, expected)
 

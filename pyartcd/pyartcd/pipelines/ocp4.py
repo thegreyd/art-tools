@@ -100,7 +100,7 @@ class Ocp4Pipeline:
             f'--assembly={assembly}',
             f'--working-dir={self.runtime.doozer_working}',
             f'--data-path={data_path}',
-            group_param
+            group_param,
         ]
         self._slack_client = runtime.new_slack_client()
         self._mail_client = self.runtime.new_mail_client()
@@ -344,7 +344,7 @@ class Ocp4Pipeline:
         cmd.extend([
             'rpms:rebase-and-build',
             f'--version={self.version.stream}',
-            f'--release={self.version.release}'
+            f'--release={self.version.release}',
         ])
 
         if self.runtime.dry_run:
@@ -479,7 +479,7 @@ class Ocp4Pipeline:
         cmd.extend([
             'images:rebase', f'--version=v{self.version.stream}', f'--release={self.version.release}',
             f"--message='Updating Dockerfile version and release v{self.version.stream}-{self.version.release}'",
-            '--push', f"--message='{os.environ['BUILD_URL']}'"
+            '--push', f"--message='{os.environ['BUILD_URL']}'",
         ])
 
         if self.runtime.dry_run:
@@ -740,7 +740,7 @@ class Ocp4Pipeline:
         cmd = [
             'elliott',
             f'--group=openshift-{self.version.stream}',
-            "find-bugs:qe"
+            "find-bugs:qe",
         ]
         if self.runtime.dry_run:
             cmd.append('--dry-run')
@@ -769,7 +769,7 @@ class Ocp4Pipeline:
             f'--group=openshift-{self.version.stream}',
             "find-bugs:golang",
             "--analyze",
-            "--update-tracker"
+            "--update-tracker",
         ]
 
         if self.runtime.dry_run:

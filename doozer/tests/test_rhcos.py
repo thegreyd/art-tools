@@ -250,7 +250,7 @@ class TestRhcos(unittest.IsolatedAsyncioTestCase):
         cmd_assert_mock.return_value = ('{"config": {"config": {"Labels": {"version": "412.86.bogus"}}}}', None)
         pullspecs = {'machine-os-content': 'spam@eggs'}
         self.runtime.group_config.rhcos = Model({
-            "enabled_repos": ["rhel-8-baseos-rpms", "rhel-8-appstream-rpms"]
+            "enabled_repos": ["rhel-8-baseos-rpms", "rhel-8-appstream-rpms"],
         })
         repos = Repos(
             {
@@ -263,7 +263,7 @@ class TestRhcos(unittest.IsolatedAsyncioTestCase):
         runtime = MagicMock(
             repos=repos,
             group_config=Model({
-                "rhcos": {"enabled_repos": ["rhel-8-baseos-rpms", "rhel-8-appstream-rpms"]}
+                "rhcos": {"enabled_repos": ["rhel-8-baseos-rpms", "rhel-8-appstream-rpms"]},
             })
         )
         runtime.get_major_minor_fields.return_value = 4, 12

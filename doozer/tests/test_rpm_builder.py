@@ -34,9 +34,9 @@ class TestRPMBuilder(IsolatedAsyncioTestCase):
                     "git": {"url": "git@github.com:openshift-priv/foo.git", "branch": {"target": "release-4.8"}},
                     "specfile": "foo.spec",
                     "modifications": [
-                        {"action": "add", "command": ["my-command", "--my-arg"]}
+                        {"action": "add", "command": ["my-command", "--my-arg"]},
                     ],
-                }
+                },
             },
             "targets": ["rhaos-4.4-rhel-8-candidate", "rhaos-4.4-rhel-7-candidate"],
         })

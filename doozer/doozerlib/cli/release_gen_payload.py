@@ -860,7 +860,7 @@ class GenPayloadCli:
         # imagestream. Maps [is_private] -> [tag_name] -> [arch] -> PayloadEntry
         multi_specs: Dict[bool, Dict[str, Dict[str, PayloadEntry]]] = {
             True: dict(),
-            False: dict()
+            False: dict(),
         }
 
         # Ensure that all payload images have been mirrored before updating
@@ -1053,7 +1053,7 @@ class GenPayloadCli:
             "kind": "ImageStream",
             "metadata": {
                 "name": imagestream_name,
-            }
+            },
         })
         return oc.selector(f"imagestream/{imagestream_name}").object()
 
@@ -1308,8 +1308,8 @@ class GenPayloadCli:
                 "image": payload_entry.dest_pullspec,
                 "platform": {
                     "os": "linux",
-                    "architecture": go_arch_for_brew_arch(arch)
-                }
+                    "architecture": go_arch_for_brew_arch(arch),
+                },
             })
             manifest_list_hash.update(payload_entry.dest_pullspec.encode("utf-8"))
 
@@ -1354,7 +1354,7 @@ class GenPayloadCli:
                 f"--from-image-stream-file={str(multi_release_is_path)}",
                 f"--to-image-base={to_image_base}",
                 f"--to-image={to_image}",
-                "--metadata", json.dumps({"release.openshift.io/architecture": "multi"})
+                "--metadata", json.dumps({"release.openshift.io/architecture": "multi"}),
             ])
 
         # This will map arch names to a release payload pullspec we create for that arch
@@ -1384,10 +1384,10 @@ class GenPayloadCli:
                     "image": arch_release_payload,
                     "platform": {
                         "os": "linux",
-                        "architecture": go_arch_for_brew_arch(arch)
-                    }
+                        "architecture": go_arch_for_brew_arch(arch),
+                    },
                 } for arch, arch_release_payload in arch_release_dests.items()
-            ]
+            ],
         }
 
         release_payload_ml_path = self.output_path.joinpath(f"{imagestream_name}.manifest-list.yaml")
@@ -1493,17 +1493,17 @@ class GenPayloadCli:
                     "name": final_multi_pullspec,
                 },
                 "referencePolicy": {
-                    "type": "Source"
+                    "type": "Source",
                 },
                 "importPolicy": {
-                    "importMode": "PreserveOriginal"
+                    "importMode": "PreserveOriginal",
                 },
                 "name": multi_release_istag,
                 "annotations": dict(**{
                     # Prevents the release controller from trying to create a local registry release payload
                     # with oc adm release new.
                     "release.openshift.io/rewrite": "false",
-                }, **pipeline_metadata_annotations)
+                }, **pipeline_metadata_annotations),
             })
             return True
 
@@ -1848,8 +1848,8 @@ class PayloadGenerator:
                 "name": payload_entry.dest_pullspec,
             },
             "importPolicy": {
-                "importMode": "PreserveOriginal"
-            }
+                "importMode": "PreserveOriginal",
+            },
         }
 
     def build_payload_imagestream(self, imagestream_name: str, imagestream_namespace: str,
@@ -1871,11 +1871,11 @@ class PayloadGenerator:
             "metadata": {
                 "name": imagestream_name,
                 "namespace": imagestream_namespace,
-                "annotations": self.build_imagestream_annotations(assembly_wide_inconsistencies)
+                "annotations": self.build_imagestream_annotations(assembly_wide_inconsistencies),
             },
             "spec": {
                 "tags": list(payload_istags),
-            }
+            },
         }
 
         return istream_obj

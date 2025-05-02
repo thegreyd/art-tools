@@ -495,7 +495,7 @@ class PromotePipeline:
                         continue
                     manifest_arch = brew_arch_for_go_arch(manifest["platform"]["architecture"])
                     manifests_ent[manifest_arch] = {
-                        "digest": manifest["digest"]
+                        "digest": manifest["digest"],
                     }
 
             from_release = release_info.get("references", {}).get("metadata", {}).get("annotations", {}).get("release.openshift.io/from-release")
@@ -984,7 +984,7 @@ class PromotePipeline:
             f"--group={self.group}",
             "get",
             "--json", "-",
-            "--", f"{advisory}"
+            "--", f"{advisory}",
         ]
         async with self._elliott_lock:
             _, stdout, _ = await exectools.cmd_gather_async(cmd, env=self._elliott_env_vars, stderr=None)
@@ -1039,7 +1039,7 @@ class PromotePipeline:
             "elliott",
             f"--assembly={self.assembly}",
             f"--group={self.group}",
-            "verify-attached-bugs"
+            "verify-attached-bugs",
         ]
         if verify_flaws:
             cmd.append("--verify-flaws")
@@ -1167,11 +1167,11 @@ class PromotePipeline:
                             "tags": [
                                 {
                                     "name": get_primary_container_name(self.group_runtime),
-                                    "annotations": {"io.openshift.build.versions": "machine-os=00.00.212301010000-0"}
-                                }
-                            ]
-                        }
-                    }
+                                    "annotations": {"io.openshift.build.versions": "machine-os=00.00.212301010000-0"},
+                                },
+                            ],
+                        },
+                    },
                 }
                 major, minor = isolate_major_minor_in_group(self.group)
                 go_arch_suffix = go_suffix_for_arch(arch, is_private=False)
@@ -1262,7 +1262,7 @@ class PromotePipeline:
             # dest_manifest_list is the final top-level manifest-list
             dest_manifest_list = {
                 "image": dest_image_pullspec,
-                "manifests": []
+                "manifests": [],
             }
             build_tasks = []
             for manifest in source_manifest_list["manifests"]:
@@ -1279,8 +1279,8 @@ class PromotePipeline:
                     'image': arch_payload_dest,
                     'platform': {
                         'os': 'linux',
-                        'architecture': arch
-                    }
+                        'architecture': arch,
+                    },
                 })
                 # Add task to build arch-specific heterogeneous payload
                 metadata = metadata.copy() if metadata else {}
@@ -1354,7 +1354,7 @@ class PromotePipeline:
                 auth_opt = f"--docker-cfg={auth_file}"
 
         cmd = [
-            "manifest-tool", auth_opt, "push", "from-spec", "--", f"{dest_manifest_list_path}"
+            "manifest-tool", auth_opt, "push", "from-spec", "--", f"{dest_manifest_list_path}",
         ]
 
         if self.runtime.dry_run:
@@ -1457,10 +1457,10 @@ class PromotePipeline:
                     'digest': manifest['digest'],
                     'platform': {
                         'architecture': manifest['config']['architecture'],
-                        'os': manifest['config']['os']
-                    }
+                        'os': manifest['config']['os'],
+                    },
                 } for manifest in info
-            ]
+            ],
         }
 
         return manifests
@@ -1511,7 +1511,7 @@ class PromotePipeline:
             "--import-mode=PreserveOriginal",
             "--",
             image_pullspec,
-            image_stream_tag
+            image_stream_tag,
         ]
         if self.runtime.dry_run:
             self._logger.warning("[DRY RUN] Would have run %s", cmd)

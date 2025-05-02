@@ -631,8 +631,8 @@ class ImageDistGitRepo(DistGitRepo):
                     {
                         'name': 'cachito-gomod-with-deps',  # The remote source name is always `cachito-gomod-with-deps` for backward compatibility even if gomod is not used.
                         'remote_source': remote_source,
-                    }
-                ]
+                    },
+                ],
             })
 
         if self.metadata.image_build_method is not Missing and self.metadata.image_build_method != "osbs2":
@@ -1212,7 +1212,7 @@ class ImageDistGitRepo(DistGitRepo):
             'dir': self.distgit_dir,
             'repo_type': repo_type,
             'name': name,
-            'tag': ':{}'.format(tag) if tag else ''
+            'tag': ':{}'.format(tag) if tag else '',
         }
 
         cmd = cmd.format(**args)
@@ -1364,14 +1364,14 @@ class ImageDistGitRepo(DistGitRepo):
                 'outcome': outcome,
                 'art_job_url': os.getenv('BUILD_URL', 'n/a'),
                 'build_pipeline_url': build_pipeline_url if build_pipeline_url else '',
-                'pipeline_commit': 'n/a'
+                'pipeline_commit': 'n/a',
             }
 
             if outcome == KonfluxBuildOutcome.FAILURE:
                 self.logger.info('Storing failed Brew build info for %s in Konflux DB', self.metadata.name)
                 build_record_params.update({
                     'start_time': build_info.start_time,
-                    'end_time': build_info.end_time
+                    'end_time': build_info.end_time,
                 })
 
             else:
@@ -1386,7 +1386,7 @@ class ImageDistGitRepo(DistGitRepo):
                     'end_time': datetime.strptime(build_info['completion_time'], '%Y-%m-%d %H:%M:%S.%f'),
                     'image_pullspec': image_pullspec,
                     'image_tag': build_info['extra']['image']['index']['tags'][0],
-                    'build_id': str(build_info['id'])
+                    'build_id': str(build_info['id']),
                 })
 
             build_record = KonfluxBuildRecord(**build_record_params)
@@ -2096,7 +2096,7 @@ class ImageDistGitRepo(DistGitRepo):
                 df_lines.extend([
                     '',
                     '# RHEL version in final image must match the one in ART\'s config',
-                    f'RUN source /etc/os-release && [ "$PLATFORM_ID" == platform:el{el_version} ]'
+                    f'RUN source /etc/os-release && [ "$PLATFORM_ID" == platform:el{el_version} ]',
                 ])
 
             df_content = "\n".join(df_lines)
@@ -2347,7 +2347,7 @@ class ImageDistGitRepo(DistGitRepo):
             'MINOR': y,
             'SUBMINOR': z,
             'RELEASE': release,
-            'FULL_VER': '{}-{}'.format(version, release.split('.')[0])
+            'FULL_VER': '{}-{}'.format(version, release.split('.')[0]),
         }
 
         manifests_base = os.path.join(self.distgit_dir, csv_config['manifests-dir'])
@@ -2757,7 +2757,7 @@ class ImageDistGitRepo(DistGitRepo):
                     "set_env": {
                         "PATH": path,
                         "BREW_EVENT": f'{self.runtime.brew_event}',
-                        "BREW_TAG": f'{self.metadata.candidate_brew_tag()}'
+                        "BREW_TAG": f'{self.metadata.candidate_brew_tag()}',
                     },
                     "distgit_path": self.dg_path,
                 }

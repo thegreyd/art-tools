@@ -10,7 +10,7 @@ class GreateTestCase(unittest.TestCase):
             + [
                 "--assembly=stream", "--group=openshift-4.6", "create", "--type=RHBA", "--art-advisory-key=rpm",
                 "--date=2020-Jan-1", "--assigned-to=openshift-qe-errata@redhat.com",
-                "--manager=vlaad@redhat.com", "--package-owner=jdelft@redhat.com"
+                "--manager=vlaad@redhat.com", "--package-owner=jdelft@redhat.com",
             ]
         )
         self.assertIn("Would have created advisory:", out.decode("utf-8"))

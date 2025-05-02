@@ -483,7 +483,7 @@ class ConfigScanSources:
                 image_results.append({
                     'name': dgk,
                     'changed': is_changing,
-                    'reason': self.assessment_reason.get(f'{image_meta.qualified_key}+{is_changing}')
+                    'reason': self.assessment_reason.get(f'{image_meta.qualified_key}+{is_changing}'),
                 })
 
         rpm_results = []
@@ -495,7 +495,7 @@ class ConfigScanSources:
                 rpm_results.append({
                     'name': dgk,
                     'changed': is_changing,
-                    'reason': self.assessment_reason.get(f'{rpm_meta.qualified_key}+{is_changing}')
+                    'reason': self.assessment_reason.get(f'{rpm_meta.qualified_key}+{is_changing}'),
                 })
 
         results = dict(

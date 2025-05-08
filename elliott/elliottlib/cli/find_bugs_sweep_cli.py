@@ -174,7 +174,7 @@ async def find_bugs_sweep_cli(
 
     if output == 'text':
         click.echo(f"Found {len(bugs)} bugs")
-        click.echo(", ".join(sorted(str(b.id) for b in bugs)))
+        click.echo(", ".join(sorted(bugs)))
     elif output == 'json':
         bugs_dict_formatted = {key: sorted([b.id for b in bug_set]) for key, bug_set in bugs_dict.items()}
         click.echo(json.dumps(bugs_dict_formatted, indent=4))
@@ -276,7 +276,7 @@ async def find_and_attach_bugs(
     bugs = await get_bugs_sweep(runtime, find_bugs_obj, bug_tracker)
     if not bugs:
         logger.info(f"No qualified {bug_tracker.type} bugs found")
-        return []
+        return {}
 
     advisory_ids = runtime.get_default_advisories()
     included_bug_ids, _ = get_assembly_bug_ids(runtime, bug_tracker_type=bug_tracker.type)

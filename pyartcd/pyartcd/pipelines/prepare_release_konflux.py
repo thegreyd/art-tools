@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -21,6 +22,7 @@ from artcommonlib.model import Model
 from artcommonlib.util import convert_remote_git_to_ssh, new_roundtrip_yaml_handler
 from doozerlib.backend.konflux_image_builder import KonfluxImageBuilder
 from elliottlib.errata_async import AsyncErrataAPI
+from elliottlib.shipment_model import Issue, Issues, ShipmentConfig
 from ghapi.all import GhApi
 
 from pyartcd import constants
@@ -53,6 +55,7 @@ class PrepareReleaseKonfluxPipeline:
         self.group = group
         self.releases_config = None
         self._slack_client = slack_client
+        self._issues_by_kind = None
 
         # product is needed for shipment and is specified in the group config
         # assume that the product is ocp for now
@@ -125,7 +128,6 @@ class PrepareReleaseKonfluxPipeline:
             f'--assembly={self.assembly}',
             f'--working-dir={self.elliott_working_dir}',
             f'--data-path={self.build_data_repo_pull_url}',
-            f'--shipment-path={self.shipment_data_repo_pull_url}',
         ]
         self._build_repo_dir = self.working_dir / "ocp-build-data-push"
         self._shipment_repo_dir = self.working_dir / "shipment-data-push"
@@ -192,17 +194,16 @@ class PrepareReleaseKonfluxPipeline:
         if env not in ["prod", "stage"]:
             raise ValueError("shipment config `env` should be either `prod` or `stage`")
 
-        generated_shipments = {}
+        generated_shipments: Dict[str, ShipmentConfig] = {}
         for shipment_advisory_config in shipment_config["advisories"]:
             kind = shipment_advisory_config.get("kind")
             if not kind:
                 raise ValueError("shipment config should specify `kind` for an advisory")
-            shipment = await self.init_shipment(kind)
-
-            live_id = shipment_advisory_config.get("live_id")
+            shipment: ShipmentConfig = await self.init_shipment(kind)
 
             # a liveID is required for prod, but not for stage
             # so if it is missing, we need to reserve one
+            live_id = shipment_advisory_config.get("live_id")
             if env == "prod" and not live_id:
                 _LOGGER.info("Requesting liveID for %s advisory", kind)
                 if self.dry_run:
@@ -213,9 +214,12 @@ class PrepareReleaseKonfluxPipeline:
                 if not live_id:
                     raise ValueError(f"Failed to get liveID for {kind} advisory")
                 shipment_advisory_config["live_id"] = live_id
-
             if live_id:
-                shipment["shipment"]["environments"][env]["liveID"] = live_id
+                getattr(shipment.shipment.environments, env).liveID = live_id
+
+            # find issues for the advisory
+            issues = await self.find_issues(kind)
+            shipment.shipment.data.releaseNotes.issues = issues
 
             generated_shipments[kind] = shipment
 
@@ -242,7 +246,7 @@ class PrepareReleaseKonfluxPipeline:
             content = await f.read()
         return yaml.load(content)
 
-    async def _load_releases_config(self) -> Optional[None]:
+    async def _load_releases_config(self) -> Dict:
         repo = self._build_repo_dir
         if not repo.exists():
             await self.clone_build_data()
@@ -253,20 +257,41 @@ class PrepareReleaseKonfluxPipeline:
             content = await f.read()
         return yaml.load(content)
 
-    async def init_shipment(self, advisory_key: str) -> str:
+    async def init_shipment(self, kind: str) -> ShipmentConfig:
         create_cmd = self._elliott_base_command + [
+            f'--shipment-path={self.shipment_data_repo_pull_url}',
             "shipment",
             "init",
-            f"--advisory-key={advisory_key}",
+            f"--advisory-key={kind}",
             f"--application={self.application}",
         ]
-        _, stdout, _ = await exectools.cmd_gather_async(create_cmd, check=True)
+        _, stdout, _ = await exectools.cmd_gather_async(create_cmd)
         _LOGGER.info("Shipment init command output:\n %s", stdout)
-        shipment = yaml.load(stdout)
+        out = yaml.load(stdout)
+        shipment = ShipmentConfig(**out)
         return shipment
 
+    async def find_issues(self, kind: str) -> Issues:
+        if self._issues_by_kind:
+            return self._issues_by_kind.get(kind)
+
+        find_bugs_cmd = self._elliott_base_command + [
+            "find-bugs:sweep",
+            "--output=json",
+            "--permissive",  # TODO: this will be decided based on advisory type, logic in prepare-release
+        ]
+        _, stdout, _ = await exectools.cmd_gather_async(find_bugs_cmd)
+        _LOGGER.info("Shipment find bugs command output:\n %s", stdout)
+        self._issues_by_kind = {}
+        for advisory_kind, bugs in json.loads(stdout).items():
+            if not bugs:
+                continue
+            issues = Issues(fixed=[Issue(id=b, source="issues.redhat.com") for b in bugs])
+            self._issues_by_kind[advisory_kind] = issues
+        return self._issues_by_kind.get(kind)
+
     async def update_shipment_data(
-        self, shipments: Dict[str, Dict], env: str, commit_message: str, branch: str
+        self, shipments: Dict[str, ShipmentConfig], env: str, commit_message: str, branch: str
     ) -> List[str]:
         relative_target_dir = Path("shipment") / self.product / self.group / self.application / env
         target_dir = self._shipment_repo_dir / relative_target_dir
@@ -283,7 +308,7 @@ class PrepareReleaseKonfluxPipeline:
             filepath = target_dir / filename
             _LOGGER.info("Updating shipment file: %s", filepath)
             out = StringIO()
-            yaml.dump(shipment_config, out)
+            yaml.dump(shipment_config.model_dump(exclude_unset=True, exclude_none=True), out)
             async with aiofiles.open(filepath, "w") as f:
                 await f.write(out.getvalue())
             # Use relative path for git add
@@ -343,7 +368,7 @@ class PrepareReleaseKonfluxPipeline:
 
         _LOGGER.info("Shipment MR updated: %s", shipment_url)
 
-    async def create_shipment_mr(self, shipment_configs: Dict[str, Dict], env: str) -> None:
+    async def create_shipment_mr(self, shipment_configs: Dict[str, ShipmentConfig], env: str) -> None:
         _LOGGER.info("Creating shipment MR...")
         await self.clone_shipment_data()
 

@@ -433,24 +433,31 @@ class PrepareReleaseKonfluxPipeline:
             base=base,
         )
         if not existing_prs.items:
-            result = api.pulls.create(
-                head=head,
-                base=base,
-                title=pr_title,
-                body=pr_body,
-                maintainer_can_modify=True,
-            )
-            _LOGGER.info("PR to update shipments created: %s", result.html_url)
-            # await self._slack_client.say_in_thread(f"PR to update shipments created: {result.html_url}")
+            if self.dry_run:
+                _LOGGER.info("Dry run: Would have created a new PR with title '%s'", pr_title)
+            else:
+                result = api.pulls.create(
+                    head=head,
+                    base=base,
+                    title=pr_title,
+                    body=pr_body,
+                    maintainer_can_modify=True,
+                )
+                _LOGGER.info("PR to update shipments created: %s", result.html_url)
+                # await self._slack_client.say_in_thread(f"PR to update shipments created: {result.html_url}")
         else:
+            _LOGGER.info("Existing PR to update shipments found: %s", existing_prs.items[0].html_url)
             pull_number = existing_prs.items[0].number
-            result = api.pulls.update(
-                pull_number=pull_number,
-                title=pr_title,
-                body=pr_body,
-            )
-            _LOGGER.info("PR to update shipments updated: %s", result.html_url)
-            # await self._slack_client.say_in_thread(f"PR to update shipments updated: {result.html_url}")
+            if self.dry_run:
+                _LOGGER.info("Dry run: Would have updated PR with number %s", pull_number)
+            else:
+                result = api.pulls.update(
+                    pull_number=pull_number,
+                    title=pr_title,
+                    body=pr_body,
+                )
+                _LOGGER.info("PR to update shipments updated: %s", result.html_url)
+                # await self._slack_client.say_in_thread(f"PR to update shipments updated: {result.html_url}")
 
         return True
 

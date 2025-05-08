@@ -51,7 +51,6 @@ class PrepareReleaseKonfluxPipeline:
         self.release_name = None
         self.product = None
         self.group = group
-        self.group_config = None
         self.releases_config = None
         self._slack_client = slack_client
 
@@ -113,8 +112,8 @@ class PrepareReleaseKonfluxPipeline:
         self.elliott_working_dir = self.working_dir / "elliott-working"
 
         group_param = f'--group={group}'
-        if self.source_build_data_branch:
-            group_param += f'@{self.source_build_data_branch}'
+        if self.build_data_gitref:
+            group_param += f'@{self.build_data_gitref}'
 
         self._elliott_base_command = [
             'elliott',
@@ -135,7 +134,7 @@ class PrepareReleaseKonfluxPipeline:
         shutil.rmtree(self._shipment_repo_dir, ignore_errors=True)
         shutil.rmtree(self.elliott_working_dir, ignore_errors=True)
 
-        self.group_config = await self._load_group_config()
+        group_config = await self._load_group_config()
         self.releases_config = await self._load_releases_config()
         if self.releases_config.get("releases", {}).get(self.assembly) is None:
             raise ValueError(f"Assembly not found: {self.assembly}")
@@ -154,17 +153,21 @@ class PrepareReleaseKonfluxPipeline:
         self.release_name = get_release_name_for_assembly(self.group, self.releases_config, self.assembly)
         self.release_version = semver.VersionInfo.parse(self.release_name).to_tuple()
 
-        group_config = assembly_group_config(
-            Model(self.releases_config), self.assembly, Model(self.group_config)
+        global_group_config = assembly_group_config(
+            Model(self.releases_config), self.assembly, Model(group_config)
         ).primitive()
-        self.product = group_config.get("product", "ocp")
+        self.product = global_group_config.get("product", "ocp")
 
         await self.prepare_shipment()
 
     async def prepare_shipment(self):
+        group_config = (
+            self.releases_config["releases"][self.assembly].setdefault("assembly", {}).setdefault("group", {})
+        )
+        shipment_key = next(k for k in group_config.keys() if k.startswith("shipments"))
+        shipments = group_config.get(shipment_key, []).copy()
+
         # restrict to only one shipment for now
-        shipment_key = next(k for k in self.group_config.keys() if k.startswith("shipments"))
-        shipments = self.group_config.get(shipment_key, []).copy()
         if len(shipments) != 1:
             raise ValueError("Operation not supported: shipments should have atleast and only one entry (for now)")
 
@@ -210,9 +213,10 @@ class PrepareReleaseKonfluxPipeline:
             shipment_mr_url = await self.create_shipment_mr(generated_shipments, env)
             shipment_config["url"] = shipment_mr_url
             # await self._slack_client.say_in_thread(f"Shipment MR created: {shipment_mr_url}")
-            await self.update_build_data(shipments)
         else:
-            _LOGGER.info("Shipment MR already exists. Nothing to do: %s", shipment_url)
+            _LOGGER.info("Shipment MR already exists: %s", shipment_url)
+
+        await self.update_build_data(shipments)
 
     @cached_property
     def _errata_api(self):
@@ -334,7 +338,7 @@ class PrepareReleaseKonfluxPipeline:
         await git_helper.run_git_async(args)
 
     async def clone_build_data(self):
-        await self.clone_repo(self._build_repo_dir, self.build_data_repo_pull_url, self.build_data_gitref)
+        await self.clone_repo(self._build_repo_dir, self.build_data_repo_pull_url, self.build_data_gitref or self.group)
 
         # setup push remote
         push_url = convert_remote_git_to_ssh(self.build_data_repo_push_url)
@@ -407,16 +411,17 @@ class PrepareReleaseKonfluxPipeline:
             return True
 
         head = f"{source_owner}:{branch}"
+        base = self.build_data_gitref or self.group
         api = GhApi(owner=target_owner, repo=target_repo, token=self.github_token)
         existing_prs = api.pulls.list(
             state="open",
             head=head,
-            base=self.build_data_gitref,
+            base=base,
         )
         if not existing_prs.items:
             result = api.pulls.create(
                 head=head,
-                base=self.build_data_gitref,
+                base=base,
                 title=pr_title,
                 body=pr_body,
                 maintainer_can_modify=True,

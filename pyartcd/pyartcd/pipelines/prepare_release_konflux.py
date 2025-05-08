@@ -54,6 +54,10 @@ class PrepareReleaseKonfluxPipeline:
         self.releases_config = None
         self._slack_client = slack_client
 
+        # product is needed for shipment and is specified in the group config
+        # assume that the product is ocp for now
+        self.product = 'ocp'
+
         # We want to have clear pull and push targets for both the build data repo and the shipment data repo
         # so that later on when we create PR/MR to update each of them, we know exactly where to push
         # and what the target repo/branches are.
@@ -73,11 +77,11 @@ class PrepareReleaseKonfluxPipeline:
 
         self.shipment_data_repo_pull_url = (
             shipment_repo_url
-            or self.runtime.config.get("build_config", {}).get("shipment_data_url")
-            or SHIPMENT_DATA_URL_TEMPLATE.format('ocp')
+            or self.runtime.config.get("shipment_config", {}).get("shipment_data_url")
+            or SHIPMENT_DATA_URL_TEMPLATE.format(self.product)
         )
         self.shipment_data_repo_push_url = (
-            self.runtime.config.get("build_config", {}).get("ocp_build_data_push_url")
+            self.runtime.config.get("shipment_config", {}).get("shipment_data_push_url")
             or self.shipment_data_repo_pull_url
         )
 
@@ -156,7 +160,12 @@ class PrepareReleaseKonfluxPipeline:
         global_group_config = assembly_group_config(
             Model(self.releases_config), self.assembly, Model(group_config)
         ).primitive()
-        self.product = global_group_config.get("product", "ocp")
+
+        # earlier we assumed the value of the product
+        # assert here
+        group_product = global_group_config.get("product", self.product)
+        if group_product != self.product:
+            raise ValueError(f"Product mismatch: {group_product} != {self.product}")
 
         await self.prepare_shipment()
 
@@ -387,16 +396,21 @@ class PrepareReleaseKonfluxPipeline:
         # Commit changes
         await run_git_async(["-C", str(repo), "commit", "-m", f"Update shipment for assembly {self.assembly}"])
 
-        # Push changes to a new branch
+        # Push if branch doesn't already exist upstream
         branch = f"update-shipment-{self.release_name}"
-        cmd = ["-C", str(repo), "push", "push", branch]
-
-        if self.dry_run:
-            _LOGGER.info("Would have run cmd to push changes to upstream: %s", " ".join(cmd))
-            return True
-
-        _LOGGER.info("Pushing changes to upstream...")
-        await run_git_async(cmd)
+        check_branch_cmd = ["-C", str(repo), "ls-remote", "--heads", "push", branch]
+        _, stdout, _ = await gather_git_async(check_branch_cmd, check=False)
+        branch_exists = branch in stdout
+        if branch_exists:
+            _LOGGER.info("Branch %s already exists upstream. Skipping push.", branch)
+        else:
+            # Push changes to a new branch
+            cmd = ["-C", str(repo), "push", "push", f"HEAD:{branch}"]
+            if self.dry_run:
+                _LOGGER.info("Would have created new branch upstream: %s", " ".join(cmd))
+            else:
+                _LOGGER.info("Pushing changes to upstream...")
+                await run_git_async(cmd)
 
         api = GhApi()
         target_repo = self.build_data_repo_pull_url.split('/')[-1].replace('.git', '')
@@ -426,7 +440,8 @@ class PrepareReleaseKonfluxPipeline:
                 body=pr_body,
                 maintainer_can_modify=True,
             )
-            _LOGGER.info("Pull request created: %s", result.html_url)
+            _LOGGER.info("PR to update shipments created: %s", result.html_url)
+            # await self._slack_client.say_in_thread(f"PR to update shipments created: {result.html_url}")
         else:
             pull_number = existing_prs.items[0].number
             result = api.pulls.update(
@@ -434,7 +449,8 @@ class PrepareReleaseKonfluxPipeline:
                 title=pr_title,
                 body=pr_body,
             )
-            _LOGGER.info("Pull request updated: %s", result.html_url)
+            _LOGGER.info("PR to update shipments updated: %s", result.html_url)
+            # await self._slack_client.say_in_thread(f"PR to update shipments updated: {result.html_url}")
 
         return True
 
@@ -445,41 +461,40 @@ class PrepareReleaseKonfluxPipeline:
     "--group",
     metavar='NAME',
     required=True,
-    help="The group of components on which to operate. e.g. openshift-4.9",
+    help="The group to operate on e.g. openshift-4.18",
 )
 @click.option(
     "--assembly",
     metavar="ASSEMBLY_NAME",
     required=True,
-    default="stream",
-    help="The name of an assembly to rebase & build for. e.g. 4.9.1",
+    help="The assembly to operate on e.g. 4.18.5",
 )
 @click.option(
-    '--build-data-path',
+    '--build-repo-url',
     help='ocp-build-data repo to use. Defaults to group branch - to use a different branch/commit use repo@branch',
 )
 @click.option(
-    '--target-shipment-repo-url',
-    help='shipment-data repo to use for creating shipment MR. Should reside in gitlab.cee.redhat.com',
+    '--shipment-repo-url',
+    help='shipment-data repo to use for reading and as shipment MR target. Defaults to main branch. Should reside in gitlab.cee.redhat.com',
 )
 @pass_runtime
 @click_coroutine
 async def prepare_release(
-    runtime: Runtime, group: str, assembly: str, build_data_path: Optional[str], target_shipment_repo_url: Optional[str]
+    runtime: Runtime, group: str, assembly: str, build_repo_url: Optional[str], shipment_repo_url: Optional[str]
 ):
-    slack_client = runtime.new_slack_client()
-    slack_client.bind_channel(group)
+    # slack_client = runtime.new_slack_client()
+    # slack_client.bind_channel(group)
     # await slack_client.say_in_thread(f":construction: prepare-release-konflux for {assembly} :construction:")
 
     try:
         # start pipeline
         pipeline = PrepareReleaseKonfluxPipeline(
-            slack_client=slack_client,
+            slack_client='',  # slack_client,
             runtime=runtime,
             group=group,
             assembly=assembly,
-            build_repo_url=build_data_path,
-            shipment_repo_url=target_shipment_repo_url,
+            build_repo_url=build_repo_url,
+            shipment_repo_url=shipment_repo_url,
         )
         await pipeline.run()
         # await slack_client.say_in_thread(f":white_check_mark: prepare-release-konflux for {assembly} completes.")

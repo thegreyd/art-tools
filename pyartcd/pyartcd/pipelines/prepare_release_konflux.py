@@ -182,50 +182,53 @@ class PrepareReleaseKonfluxPipeline:
 
         shipment_config = shipments[0]
         shipment_url = shipment_config.get("url", "")
+
+        if not shipment_config.get("advisories", []):
+            raise ValueError(
+                "Operation not supported: shipment config should specify which advisories to create and prepare"
+            )
+
+        env = shipment_config.get("env", "prod")
+        if env not in ["prod", "stage"]:
+            raise ValueError("shipment config `env` should be either `prod` or `stage`")
+
+        generated_shipments = {}
+        for shipment_advisory_config in shipment_config["advisories"]:
+            kind = shipment_advisory_config.get("kind")
+            if not kind:
+                raise ValueError("shipment config should specify `kind` for an advisory")
+            shipment = await self.init_shipment(kind)
+
+            live_id = shipment_advisory_config.get("live_id")
+
+            # a liveID is required for prod, but not for stage
+            # so if it is missing, we need to reserve one
+            if env == "prod" and not live_id:
+                _LOGGER.info("Requesting liveID for %s advisory", kind)
+                if self.dry_run:
+                    _LOGGER.warning("Dry run: Would've reserved liveID for %s advisory", kind)
+                    live_id = "DRY_RUN_LIVE_ID"
+                else:
+                    live_id = await self._errata_api.reserve_live_id()
+                if not live_id:
+                    raise ValueError(f"Failed to get liveID for {kind} advisory")
+                shipment_advisory_config["live_id"] = live_id
+
+            if live_id:
+                shipment["shipment"]["environments"][env]["liveID"] = live_id
+
+            generated_shipments[kind] = shipment
+
         if not shipment_url or shipment_url == "N/A":
-            if not shipment_config.get("advisories", []):
-                raise ValueError(
-                    "Operation not supported: shipment config should specify which advisories to create and prepare"
-                )
-
-            env = shipment_config.get("env", "prod")
-            if env not in ["prod", "stage"]:
-                raise ValueError("shipment config `env` should be either `prod` or `stage`")
-
-            generated_shipments = {}
-            for shipment_advisory_config in shipment_config["advisories"]:
-                kind = shipment_advisory_config.get("kind")
-                if not kind:
-                    raise ValueError("shipment config should specify `kind` for an advisory")
-                shipment = await self.init_shipment(kind)
-
-                live_id = shipment_advisory_config.get("live_id")
-
-                # a liveID is required for prod, but not for stage
-                # so if it is missing, we need to reserve one
-                if env == "prod" and not live_id:
-                    _LOGGER.info("Requesting liveID for %s advisory", kind)
-                    if self.dry_run:
-                        _LOGGER.warning("Dry run: Would've reserved liveID for %s advisory", kind)
-                        live_id = "DRY_RUN_LIVE_ID"
-                    else:
-                        live_id = await self._errata_api.reserve_live_id()
-                    if not live_id:
-                        raise ValueError(f"Failed to get liveID for {kind} advisory")
-                    shipment_advisory_config["live_id"] = live_id
-
-                if live_id:
-                    shipment["shipment"]["environments"][env]["liveID"] = live_id
-
-                generated_shipments[kind] = shipment
-
             shipment_mr_url = await self.create_shipment_mr(generated_shipments, env)
             shipment_config["url"] = shipment_mr_url
             # await self._slack_client.say_in_thread(f"Shipment MR created: {shipment_mr_url}")
         else:
-            _LOGGER.info("Shipment MR already exists: %s", shipment_url)
+            _LOGGER.info("Shipment MR already exists: %s. Checking if it needs an update..", shipment_url)
+            await self.update_shipment_mr(generated_shipments, env, shipment_url)
 
-        await self.update_build_data(shipments)
+        if shipments != group_config.get(shipment_key):
+            await self.update_build_data(shipments)
 
     @cached_property
     def _errata_api(self):
@@ -262,13 +265,87 @@ class PrepareReleaseKonfluxPipeline:
         shipment = yaml.load(stdout)
         return shipment
 
+    async def update_shipment_data(
+        self, shipments: Dict[str, Dict], env: str, commit_message: str, branch: str
+    ) -> List[str]:
+        relative_target_dir = Path("shipment") / self.product / self.group / self.application / env
+        target_dir = self._shipment_repo_dir / relative_target_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        added_files = []
+
+        # Get the timestamp from the branch name
+        # which we need for filenames
+        # The branch name is expected to be in the format: prepare-shipment-<assembly>-<timestamp>
+        timestamp = branch.split("-")[-1]
+
+        for advisory_key, shipment_config in shipments.items():
+            filename = f"{self.assembly}.{advisory_key}.{timestamp}.yaml"
+            filepath = target_dir / filename
+            _LOGGER.info("Updating shipment file: %s", filepath)
+            out = StringIO()
+            yaml.dump(shipment_config, out)
+            async with aiofiles.open(filepath, "w") as f:
+                await f.write(out.getvalue())
+            # Use relative path for git add
+            added_files.append(str(filepath.relative_to(self._shipment_repo_dir)))
+
+        # Dump diff to stdout
+        await run_git_async(["-C", str(self._shipment_repo_dir), "--no-pager", "diff"])
+
+        # Add files
+        await run_git_async(["-C", str(self._shipment_repo_dir), "add"] + added_files)
+
+        # Make sure there are changes to commit
+        rc = await gather_git_async(["-C", str(self._shipment_repo_dir), "diff-index", "--quiet", "HEAD"], check=False)
+        if rc == 0:
+            _LOGGER.info("No changes in shipment data")
+            return
+
+        await run_git_async(["-C", str(self._shipment_repo_dir), "commit", "-m", commit_message])
+
+        # Push branch
+        if not self.dry_run:
+            _LOGGER.info("Pushing branch %s upstream...", branch)
+            await run_git_async(["-C", str(self._shipment_repo_dir), "push", "-u", "push", branch])
+        else:
+            _LOGGER.info("[DRY-RUN] Would have pushed branch %s", branch)
+
+    async def update_shipment_mr(self, shipments: Dict[str, Dict], env: str, shipment_url: str) -> None:
+        _LOGGER.info("Updating shipment MR: %s", shipment_url)
+
+        # Clone the shipment data repository if not already cloned
+        await self.clone_shipment_data()
+
+        # Parse the shipment URL to extract project and MR details
+        parsed_url = urlparse(shipment_url)
+        project_path = parsed_url.path.strip('/').split('/-/merge_requests')[0]
+        mr_id = parsed_url.path.split('/')[-1]
+
+        # Load the existing MR
+        gl = gitlab.Gitlab(self.gitlab_url, private_token=self.gitlab_token)
+        gl.auth()
+        project = gl.projects.get(project_path)
+        mr = project.mergerequests.get(mr_id)
+
+        # Checkout the MR branch
+        source_branch = mr.source_branch
+        await run_git_async(["-C", str(self._shipment_repo_dir), "fetch", "origin", f"{source_branch}:{source_branch}"])
+        await run_git_async(["-C", str(self._shipment_repo_dir), "checkout", source_branch])
+
+        # Update shipment data
+        commit_message = f"Update shipment configurations for {self.release_name}"
+        await self.update_shipment_data(shipments, env, commit_message, source_branch)
+
+        # Update the MR description
+        mr_description = f"Updated by job: {self.job_url}\n\n" if self.job_url else commit_message
+        mr.description = mr_description
+        mr.save()
+
+        _LOGGER.info("Shipment MR updated: %s", shipment_url)
+
     async def create_shipment_mr(self, shipment_configs: Dict[str, Dict], env: str) -> None:
         _LOGGER.info("Creating shipment MR...")
         await self.clone_shipment_data()
-        # Define target directory relative to repo root
-        relative_target_dir = Path("shipment") / self.product / self.group / self.application / env
-        target_dir = self.shipment_repo_dir / relative_target_dir
-        target_dir.mkdir(parents=True, exist_ok=True)
 
         # Create branch name
         timestamp = datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M%S')
@@ -276,34 +353,11 @@ class PrepareReleaseKonfluxPipeline:
         target_branch = "main"
 
         # Create and checkout branch
-        await run_git_async(["-C", str(self.shipment_repo_dir), "checkout", "-b", source_branch])
+        await run_git_async(["-C", str(self._shipment_repo_dir), "checkout", "-b", source_branch])
 
-        # Create shipment files
-        added_files = []
-        for advisory_key, shipment_config in shipment_configs.items():
-            filename = f"{self.assembly}.{advisory_key}.{timestamp}.yaml"
-            filepath = target_dir / filename
-            _LOGGER.info("Creating shipment file: %s", filepath)
-            out = StringIO()
-            yaml.dump(shipment_config, out)
-            async with aiofiles.open(filepath, "w") as f:
-                await f.write(out.getvalue())
-            # Use relative path for git add
-            added_files.append(str(filepath.relative_to(self.shipment_repo_dir)))
-
-        # Commit changes
-        await run_git_async(["-C", str(self.shipment_repo_dir), "add"] + added_files)
+        # update shipment data repo with shipment configs
         commit_message = f"Add shipment configurations for {self.release_name}"
-        await run_git_async(["-C", str(self.shipment_repo_dir), "commit", "-m", commit_message])
-
-        # Push branch
-        if not self.dry_run:
-            _LOGGER.info("Pushing branch %s to origin...", source_branch)
-            await run_git_async(["-C", str(self.shipment_repo_dir), "push", "-u", "origin", source_branch])
-        else:
-            _LOGGER.warning("Would have pushed branch %s to origin", source_branch)
-            _LOGGER.warning("Would have created MR with title: %s", commit_message)
-            return f"{self.gitlab_url}/placeholder/placeholder/-/merge_requests/placeholder"
+        await self.update_shipment_data(shipment_configs, env, commit_message, source_branch)
 
         gl = gitlab.Gitlab(self.gitlab_url, private_token=self.gitlab_token)
         gl.auth()
@@ -319,18 +373,23 @@ class PrepareReleaseKonfluxPipeline:
         mr_title = f"Shipment for {self.release_name}"
         mr_description = f"Created by job: {self.job_url}\n\n" if self.job_url else commit_message
 
-        mr = source_project.mergerequests.create(
-            {
-                'source_branch': source_branch,
-                'target_project_id': target_project.id,
-                'target_branch': target_branch,
-                'title': mr_title,
-                'description': mr_description,
-                'remove_source_branch': True,
-            }
-        )
-        mr_url = mr.web_url
-        _LOGGER.info("Created Merge Request: %s", mr_url)
+        if self.dry_run:
+            _LOGGER.info("[DRY-RUN] Would have created MR with title: %s", mr_title)
+            mr_url = f"{self.gitlab_url}/placeholder/placeholder/-/merge_requests/placeholder"
+        else:
+            mr = source_project.mergerequests.create(
+                {
+                    'source_branch': source_branch,
+                    'target_project_id': target_project.id,
+                    'target_branch': target_branch,
+                    'title': mr_title,
+                    'description': mr_description,
+                    'remove_source_branch': True,
+                }
+            )
+            mr_url = mr.web_url
+            _LOGGER.info("Created Merge Request: %s", mr_url)
+
         return mr_url
 
     async def clone_repo(self, local_path: Path, repo_url: str, branch: str):
@@ -366,37 +425,9 @@ class PrepareReleaseKonfluxPipeline:
 
     async def update_build_data(self, shipments: List[Dict]) -> bool:
         repo = self._build_repo_dir
-        group_config = (
-            self.releases_config["releases"][self.assembly].setdefault("assembly", {}).setdefault("group", {})
-        )
 
-        # Assembly key names are not always exact, they can end in special chars like !,?,-
-        # to indicate special inheritance rules. So respect those
-        # https://art-docs.engineering.redhat.com/assemblies/#inheritance-rules
-        shipment_key = next(k for k in group_config.keys() if k.startswith("shipments"))
-        group_config[shipment_key] = shipments
-
-        out = StringIO()
-        yaml.dump(self.releases_config, out)
-        async with aiofiles.open(repo / "releases.yml", "w") as f:
-            await f.write(out.getvalue())
-
-        # Dump diff to stdout
-        await run_git_async(["-C", str(repo), "--no-pager", "diff"])
-
-        # Add release config to git
-        await run_git_async(["-C", str(repo), "add", "releases.yml"])
-
-        # Make sure there are changes to commit
-        rc = await gather_git_async(["-C", str(repo), "diff-index", "--quiet", "HEAD"], check=False)
-        if rc == 0:
-            _LOGGER.info("No changes in releases.yml")
-            return False
-
-        # Commit changes
-        await run_git_async(["-C", str(repo), "commit", "-m", f"Update shipment for assembly {self.assembly}"])
-
-        # Push if branch doesn't already exist upstream
+        # Check if branch doesn't already exist upstream
+        # if it does, assume that it is updated
         branch = f"update-shipment-{self.release_name}"
         check_branch_cmd = ["-C", str(repo), "ls-remote", "--heads", "push", branch]
         _, stdout, _ = await gather_git_async(check_branch_cmd, check=False)
@@ -404,8 +435,40 @@ class PrepareReleaseKonfluxPipeline:
         if branch_exists:
             _LOGGER.info("Branch %s already exists upstream. Skipping push.", branch)
         else:
+            group_config = (
+                self.releases_config["releases"][self.assembly].setdefault("assembly", {}).setdefault("group", {})
+            )
+
+            # Assembly key names are not always exact, they can end in special chars like !,?,-
+            # to indicate special inheritance rules. So respect those
+            # https://art-docs.engineering.redhat.com/assemblies/#inheritance-rules
+            shipment_key = next(k for k in group_config.keys() if k.startswith("shipments"))
+            group_config[shipment_key] = shipments
+
+            await run_git_async(["-C", str(repo), "checkout", "-b", branch])
+
+            out = StringIO()
+            yaml.dump(self.releases_config, out)
+            async with aiofiles.open(repo / "releases.yml", "w") as f:
+                await f.write(out.getvalue())
+
+            # Dump diff to stdout
+            await run_git_async(["-C", str(repo), "--no-pager", "diff"])
+
+            # Add release config to git
+            await run_git_async(["-C", str(repo), "add", "releases.yml"])
+
+            # Make sure there are changes to commit
+            rc = await gather_git_async(["-C", str(repo), "diff-index", "--quiet", "HEAD"], check=False)
+            if rc == 0:
+                _LOGGER.info("No changes in releases.yml")
+                return False
+
+            # Commit changes
+            await run_git_async(["-C", str(repo), "commit", "-m", f"Update shipment for assembly {self.assembly}"])
+
             # Push changes to a new branch
-            cmd = ["-C", str(repo), "push", "push", f"HEAD:{branch}"]
+            cmd = ["-C", str(repo), "push", "-u", "push", branch]
             if self.dry_run:
                 _LOGGER.info("Would have created new branch upstream: %s", " ".join(cmd))
             else:
@@ -419,6 +482,8 @@ class PrepareReleaseKonfluxPipeline:
 
         pr_title = f"Update shipment for assembly {self.assembly}"
         pr_body = f"This PR updates the shipment data for assembly {self.assembly}."
+        if self.job_url:
+            pr_body += f"\n\nCreated by job: {self.job_url}"
 
         if self.dry_run:
             _LOGGER.info("Dry run: Would have created a pull request with title '%s'", pr_title)

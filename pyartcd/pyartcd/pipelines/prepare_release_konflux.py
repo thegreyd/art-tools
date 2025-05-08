@@ -21,6 +21,7 @@ from artcommonlib.model import Model
 from artcommonlib.util import convert_remote_git_to_ssh, new_roundtrip_yaml_handler
 from doozerlib.backend.konflux_image_builder import KonfluxImageBuilder
 from elliottlib.errata_async import AsyncErrataAPI
+from ghapi.all import GhApi
 
 from pyartcd import constants
 from pyartcd.cli import cli, click_coroutine, pass_runtime
@@ -81,9 +82,13 @@ class PrepareReleaseKonfluxPipeline:
             or self.shipment_data_repo_pull_url
         )
 
+        self.github_token = os.environ.get('GITHUB_TOKEN')
+        if not self.github_token:
+            raise ValueError("GITHUB_TOKEN environment variable is required to create a pull request")
+
         self.gitlab_token = os.environ.get("GITLAB_TOKEN")
         if not self.gitlab_token:
-            raise ValueError("GITLAB_TOKEN environment variable not set.")
+            raise ValueError("GITLAB_TOKEN environment variable is required to create a merge request")
         self.gitlab_url = self.runtime.config.get("gitlab_url", "https://gitlab.cee.redhat.com")
         if self.gitlab_url not in self.shipment_data_repo_pull_url:
             raise ValueError(
@@ -116,7 +121,7 @@ class PrepareReleaseKonfluxPipeline:
             group_param,
             f'--assembly={self.assembly}',
             f'--working-dir={self.elliott_working_dir}',
-            f'--data-path={self.source_build_data_url}',
+            f'--data-path={self.build_data_repo_pull_url}',
             f'--shipment-path={self.shipment_data_repo_pull_url}',
         ]
         self._build_repo_dir = self.working_dir / "ocp-build-data-push"
@@ -388,6 +393,44 @@ class PrepareReleaseKonfluxPipeline:
 
         _LOGGER.info("Pushing changes to upstream...")
         await run_git_async(cmd)
+
+        api = GhApi()
+        target_repo = self.build_data_repo_pull_url.split('/')[-1].replace('.git', '')
+        source_owner = self.build_data_repo_push_url.split('/')[-2]
+        target_owner = self.build_data_repo_pull_url.split('/')[-2]
+
+        pr_title = f"Update shipment for assembly {self.assembly}"
+        pr_body = f"This PR updates the shipment data for assembly {self.assembly}."
+
+        if self.dry_run:
+            _LOGGER.info("Dry run: Would have created a pull request with title '%s'", pr_title)
+            return True
+
+        head = f"{source_owner}:{branch}"
+        api = GhApi(owner=target_owner, repo=target_repo, token=self.github_token)
+        existing_prs = api.pulls.list(
+            state="open",
+            head=head,
+            base=self.build_data_gitref,
+        )
+        if not existing_prs.items:
+            result = api.pulls.create(
+                head=head,
+                base=self.build_data_gitref,
+                title=pr_title,
+                body=pr_body,
+                maintainer_can_modify=True,
+            )
+            _LOGGER.info("Pull request created: %s", result.html_url)
+        else:
+            pull_number = existing_prs.items[0].number
+            result = api.pulls.update(
+                pull_number=pull_number,
+                title=pr_title,
+                body=pr_body,
+            )
+            _LOGGER.info("Pull request updated: %s", result.html_url)
+
         return True
 
 

@@ -321,7 +321,7 @@ class PrepareReleaseKonfluxPipeline:
         await run_git_async(["-C", str(self._shipment_repo_dir), "add"] + added_files)
 
         # Make sure there are changes to commit
-        rc = await gather_git_async(["-C", str(self._shipment_repo_dir), "diff-index", "--quiet", "HEAD"], check=False)
+        rc, _, _ = await gather_git_async(["-C", str(self._shipment_repo_dir), "diff-index", "--quiet", "HEAD"], check=False)
         if rc == 0:
             _LOGGER.info("No changes in shipment data")
             return
@@ -484,7 +484,7 @@ class PrepareReleaseKonfluxPipeline:
             await run_git_async(["-C", str(repo), "add", "releases.yml"])
 
             # Make sure there are changes to commit
-            rc = await gather_git_async(["-C", str(repo), "diff-index", "--quiet", "HEAD"], check=False)
+            rc, _, _ = await gather_git_async(["-C", str(repo), "diff-index", "--quiet", "HEAD"], check=False)
             if rc == 0:
                 _LOGGER.info("No changes in releases.yml")
                 return False

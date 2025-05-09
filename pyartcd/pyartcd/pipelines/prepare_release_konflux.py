@@ -265,8 +265,14 @@ class PrepareReleaseKonfluxPipeline:
             f"--advisory-key={kind}",
             f"--application={self.application}",
         ]
-        _, stdout, _ = await exectools.cmd_gather_async(create_cmd)
-        _LOGGER.info("Shipment init command output:\n %s", stdout)
+        rc, stdout, stderr = await exectools.cmd_gather_async(create_cmd, check=False)
+        if stderr:
+            _LOGGER.info("Shipment init command stderr:\n %s", stderr)
+        if stdout:
+            _LOGGER.info("Shipment init command stdout:\n %s", stdout)
+        if rc != 0:
+            raise RuntimeError(f"cmd failed with exit code {rc}: {create_cmd}")
+
         out = yaml.load(stdout)
         shipment = ShipmentConfig(**out)
         return shipment
@@ -280,8 +286,14 @@ class PrepareReleaseKonfluxPipeline:
             "--output=json",
             "--permissive",  # TODO: this will be decided based on advisory type, logic in prepare-release
         ]
-        _, stdout, _ = await exectools.cmd_gather_async(find_bugs_cmd)
-        _LOGGER.info("Shipment find bugs command output:\n %s", stdout)
+        rc, stdout, stderr = await exectools.cmd_gather_async(find_bugs_cmd)
+        if stderr:
+            _LOGGER.info("Shipment find bugs command stderr:\n %s", stderr)
+        if stdout:
+            _LOGGER.info("Shipment find bugs command stdout:\n %s", stdout)
+        if rc != 0:
+            raise RuntimeError(f"cmd failed with exit code {rc}: {find_bugs_cmd}")
+
         self._issues_by_kind = {}
         for advisory_kind, bugs in json.loads(stdout).items():
             if not bugs:
@@ -321,7 +333,9 @@ class PrepareReleaseKonfluxPipeline:
         await run_git_async(["-C", str(self._shipment_repo_dir), "add"] + added_files)
 
         # Make sure there are changes to commit
-        rc, _, _ = await gather_git_async(["-C", str(self._shipment_repo_dir), "diff-index", "--quiet", "HEAD"], check=False)
+        rc, _, _ = await gather_git_async(
+            ["-C", str(self._shipment_repo_dir), "diff-index", "--quiet", "HEAD"], check=False
+        )
         if rc == 0:
             _LOGGER.info("No changes in shipment data")
             return

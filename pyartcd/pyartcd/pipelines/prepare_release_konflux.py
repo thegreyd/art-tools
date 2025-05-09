@@ -295,11 +295,14 @@ class PrepareReleaseKonfluxPipeline:
             raise RuntimeError(f"cmd failed with exit code {rc}: {find_bugs_cmd}")
 
         self._issues_by_kind = {}
-        for advisory_kind, bugs in json.loads(stdout).items():
-            if not bugs:
-                continue
-            issues = Issues(fixed=[Issue(id=b, source="issues.redhat.com") for b in bugs])
-            self._issues_by_kind[advisory_kind] = issues
+        # in case of no bugs, stdout will be empty
+        if stdout:
+            for advisory_kind, bugs in json.loads(stdout).items():
+                if not bugs:
+                    continue
+                issues = Issues(fixed=[Issue(id=b, source="issues.redhat.com") for b in bugs])
+                self._issues_by_kind[advisory_kind] = issues
+
         return self._issues_by_kind.get(kind)
 
     async def update_shipment_data(

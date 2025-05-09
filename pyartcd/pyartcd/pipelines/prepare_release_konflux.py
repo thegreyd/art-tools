@@ -240,7 +240,7 @@ class PrepareReleaseKonfluxPipeline:
             await self.update_shipment_mr(generated_shipments, env, shipment_url)
 
         if shipments != group_config.get(shipment_key):
-            await self.update_build_data(shipments)
+            await self.create_update_build_data_pr(shipments)
 
     @cached_property
     def _errata_api(self):
@@ -391,11 +391,15 @@ class PrepareReleaseKonfluxPipeline:
             return False
 
         # Update the MR description
-        mr_description = f"Updated by job: {self.job_url}\n\n" if self.job_url else commit_message
-        mr.description = mr_description
-        mr.save()
+        description_update = f"Updated by job: {self.job_url}\n\n" if self.job_url else commit_message
+        mr.description = f"{mr.description}\n\n{description_update}"
 
-        _LOGGER.info("Shipment MR updated: %s", shipment_url)
+        if self.dry_run:
+            _LOGGER.info("[DRY-RUN] Would have updated MR description: %s", mr.description)
+        else:
+            mr.save()
+            _LOGGER.info("Shipment MR updated: %s", shipment_url)
+
         return True
 
     async def create_shipment_mr(self, shipment_configs: Dict[str, ShipmentConfig], env: str) -> str:
@@ -481,71 +485,68 @@ class PrepareReleaseKonfluxPipeline:
         push_url = f'https://oauth2:{self.gitlab_token}@{rest_of_the_url}'
         await run_git_async(["-C", str(self._shipment_repo_dir), "remote", "add", "push", push_url])
 
-    async def update_build_data(self, shipments: List[Dict]) -> bool:
+    async def update_build_data(self, group_shipment_config: List[Dict], branch: str) -> bool:
         repo = self._build_repo_dir
 
         # Check if branch doesn't already exist upstream
         # if it does, assume that it is updated
-        branch = f"update-shipment-{self.release_name}"
         check_branch_cmd = ["-C", str(repo), "ls-remote", "--heads", "push", branch]
         _, stdout, _ = await gather_git_async(check_branch_cmd)
         branch_exists = branch in stdout
         if branch_exists:
             _LOGGER.info("Branch %s already exists upstream. Skipping push.", branch)
+            return False
+
+        group_config = (
+            self.releases_config["releases"][self.assembly].setdefault("assembly", {}).setdefault("group", {})
+        )
+
+        # Assembly key names are not always exact, they can end in special chars like !,?,-
+        # to indicate special inheritance rules. So respect those
+        # https://art-docs.engineering.redhat.com/assemblies/#inheritance-rules
+        shipment_key = next(k for k in group_config.keys() if k.startswith("shipments"))
+        group_config[shipment_key] = group_shipment_config
+
+        await run_git_async(["-C", str(repo), "checkout", "-b", branch])
+
+        out = StringIO()
+        yaml.dump(self.releases_config, out)
+        async with aiofiles.open(repo / "releases.yml", "w") as f:
+            await f.write(out.getvalue())
+
+        # Dump diff to stdout
+        await run_git_async(["-C", str(repo), "--no-pager", "diff"])
+
+        # Add release config to git
+        await run_git_async(["-C", str(repo), "add", "releases.yml"])
+
+        # Make sure there are changes to commit
+        rc, _, _ = await gather_git_async(["-C", str(repo), "diff-index", "--quiet", "HEAD"], check=False)
+        if rc == 0:
+            _LOGGER.info("No changes in releases.yml")
+            return False
+
+        # Commit changes
+        await run_git_async(["-C", str(repo), "commit", "-m", f"Update shipment for assembly {self.assembly}"])
+
+        # Push changes to a new branch
+        cmd = ["-C", str(repo), "push", "-u", "push", branch]
+        if self.dry_run:
+            _LOGGER.info("Would have created new branch upstream: %s", " ".join(cmd))
         else:
-            group_config = (
-                self.releases_config["releases"][self.assembly].setdefault("assembly", {}).setdefault("group", {})
-            )
+            _LOGGER.info("Pushing changes to upstream...")
+            await run_git_async(cmd)
 
-            # Assembly key names are not always exact, they can end in special chars like !,?,-
-            # to indicate special inheritance rules. So respect those
-            # https://art-docs.engineering.redhat.com/assemblies/#inheritance-rules
-            shipment_key = next(k for k in group_config.keys() if k.startswith("shipments"))
-            group_config[shipment_key] = shipments
+        return True
 
-            await run_git_async(["-C", str(repo), "checkout", "-b", branch])
-
-            out = StringIO()
-            yaml.dump(self.releases_config, out)
-            async with aiofiles.open(repo / "releases.yml", "w") as f:
-                await f.write(out.getvalue())
-
-            # Dump diff to stdout
-            await run_git_async(["-C", str(repo), "--no-pager", "diff"])
-
-            # Add release config to git
-            await run_git_async(["-C", str(repo), "add", "releases.yml"])
-
-            # Make sure there are changes to commit
-            rc, _, _ = await gather_git_async(["-C", str(repo), "diff-index", "--quiet", "HEAD"], check=False)
-            if rc == 0:
-                _LOGGER.info("No changes in releases.yml")
-                return False
-
-            # Commit changes
-            await run_git_async(["-C", str(repo), "commit", "-m", f"Update shipment for assembly {self.assembly}"])
-
-            # Push changes to a new branch
-            cmd = ["-C", str(repo), "push", "-u", "push", branch]
-            if self.dry_run:
-                _LOGGER.info("Would have created new branch upstream: %s", " ".join(cmd))
-            else:
-                _LOGGER.info("Pushing changes to upstream...")
-                await run_git_async(cmd)
+    async def create_update_build_data_pr(self, shipments) -> bool:
+        branch = f"update-shipment-{self.release_name}"
+        updated = await self.update_build_data(shipments, branch)
 
         api = GhApi()
         target_repo = self.build_data_repo_pull_url.split('/')[-1].replace('.git', '')
         source_owner = self.build_data_repo_push_url.split('/')[-2]
         target_owner = self.build_data_repo_pull_url.split('/')[-2]
-
-        pr_title = f"Update shipment for assembly {self.assembly}"
-        pr_body = f"This PR updates the shipment data for assembly {self.assembly}."
-        if self.job_url:
-            pr_body += f"\n\nCreated by job: {self.job_url}"
-
-        if self.dry_run:
-            _LOGGER.info("Dry run: Would have created a pull request with title '%s'", pr_title)
-            return True
 
         head = f"{source_owner}:{branch}"
         base = self.build_data_gitref or self.group
@@ -556,6 +557,14 @@ class PrepareReleaseKonfluxPipeline:
             base=base,
         )
         if not existing_prs.items:
+            if not updated:
+                raise ValueError("Failed to update build data repo. Please investigate.")
+
+            pr_title = f"Update shipment for assembly {self.assembly}"
+            pr_body = f"This PR updates the shipment data for assembly {self.assembly}."
+            if self.job_url:
+                pr_body += f"\n\nCreated by job: {self.job_url}"
+
             if self.dry_run:
                 _LOGGER.info("Dry run: Would have created a new PR with title '%s'", pr_title)
             else:
@@ -573,10 +582,12 @@ class PrepareReleaseKonfluxPipeline:
             pull_number = existing_prs.items[0].number
             if self.dry_run:
                 _LOGGER.info("Dry run: Would have updated PR with number %s", pull_number)
-            else:
+            elif updated:
+                pr_body = existing_prs.items[0].body
+                if self.job_url:
+                    pr_body += f"\n\nUpdated by job: {self.job_url}"
                 result = api.pulls.update(
                     pull_number=pull_number,
-                    title=pr_title,
                     body=pr_body,
                 )
                 _LOGGER.info("PR to update shipments updated: %s", result.html_url)

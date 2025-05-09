@@ -307,7 +307,7 @@ class PrepareReleaseKonfluxPipeline:
 
     async def update_shipment_data(
         self, shipments: Dict[str, ShipmentConfig], env: str, commit_message: str, branch: str
-    ) -> List[str]:
+    ) -> bool:
         relative_target_dir = Path("shipment") / self.product / self.group / self.application / env
         target_dir = self._shipment_repo_dir / relative_target_dir
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -341,7 +341,7 @@ class PrepareReleaseKonfluxPipeline:
         )
         if rc == 0:
             _LOGGER.info("No changes in shipment data")
-            return
+            return False
 
         await run_git_async(["-C", str(self._shipment_repo_dir), "commit", "-m", commit_message])
 
@@ -351,8 +351,9 @@ class PrepareReleaseKonfluxPipeline:
             await run_git_async(["-C", str(self._shipment_repo_dir), "push", "-u", "push", branch])
         else:
             _LOGGER.info("[DRY-RUN] Would have pushed branch %s", branch)
+        return True
 
-    async def update_shipment_mr(self, shipments: Dict[str, Dict], env: str, shipment_url: str) -> None:
+    async def update_shipment_mr(self, shipments: Dict[str, Dict], env: str, shipment_url: str) -> bool:
         _LOGGER.info("Updating shipment MR: %s", shipment_url)
 
         # Clone the shipment data repository if not already cloned
@@ -376,7 +377,10 @@ class PrepareReleaseKonfluxPipeline:
 
         # Update shipment data
         commit_message = f"Update shipment configurations for {self.release_name}"
-        await self.update_shipment_data(shipments, env, commit_message, source_branch)
+        updated = await self.update_shipment_data(shipments, env, commit_message, source_branch)
+        if not updated:
+            _LOGGER.info("No changes in shipment data. MR will not be updated.")
+            return False
 
         # Update the MR description
         mr_description = f"Updated by job: {self.job_url}\n\n" if self.job_url else commit_message
@@ -384,6 +388,7 @@ class PrepareReleaseKonfluxPipeline:
         mr.save()
 
         _LOGGER.info("Shipment MR updated: %s", shipment_url)
+        return True
 
     async def create_shipment_mr(self, shipment_configs: Dict[str, ShipmentConfig], env: str) -> None:
         _LOGGER.info("Creating shipment MR...")
@@ -472,7 +477,7 @@ class PrepareReleaseKonfluxPipeline:
         # if it does, assume that it is updated
         branch = f"update-shipment-{self.release_name}"
         check_branch_cmd = ["-C", str(repo), "ls-remote", "--heads", "push", branch]
-        _, stdout, _ = await gather_git_async(check_branch_cmd, check=False)
+        _, stdout, _ = await gather_git_async(check_branch_cmd)
         branch_exists = branch in stdout
         if branch_exists:
             _LOGGER.info("Branch %s already exists upstream. Skipping push.", branch)

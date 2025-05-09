@@ -184,10 +184,18 @@ class PrepareReleaseKonfluxPipeline:
 
         shipment_config = shipments[0]
         shipment_url = shipment_config.get("url", "")
-
-        if not shipment_config.get("advisories", []):
+        shipment_advisories = shipment_config.get("advisories", [])
+        if not shipment_advisories:
             raise ValueError(
                 "Operation not supported: shipment config should specify which advisories to create and prepare"
+            )
+
+        group_advisories = set(group_config.get("advisories", {}).keys())
+        shipment_advisory_kinds = {advisory.get("kind") for advisory in shipment_advisories}
+        common = shipment_advisory_kinds & group_advisories
+        if common:
+            raise ValueError(
+                f"shipment config should not specify advisories that are already defined in assembly.group.advisories: {common}"
             )
 
         env = shipment_config.get("env", "prod")
@@ -195,7 +203,7 @@ class PrepareReleaseKonfluxPipeline:
             raise ValueError("shipment config `env` should be either `prod` or `stage`")
 
         generated_shipments: Dict[str, ShipmentConfig] = {}
-        for shipment_advisory_config in shipment_config["advisories"]:
+        for shipment_advisory_config in shipment_advisories:
             kind = shipment_advisory_config.get("kind")
             if not kind:
                 raise ValueError("shipment config should specify `kind` for an advisory")
@@ -390,7 +398,7 @@ class PrepareReleaseKonfluxPipeline:
         _LOGGER.info("Shipment MR updated: %s", shipment_url)
         return True
 
-    async def create_shipment_mr(self, shipment_configs: Dict[str, ShipmentConfig], env: str) -> None:
+    async def create_shipment_mr(self, shipment_configs: Dict[str, ShipmentConfig], env: str) -> str:
         _LOGGER.info("Creating shipment MR...")
         await self.clone_shipment_data()
 
@@ -404,7 +412,10 @@ class PrepareReleaseKonfluxPipeline:
 
         # update shipment data repo with shipment configs
         commit_message = f"Add shipment configurations for {self.release_name}"
-        await self.update_shipment_data(shipment_configs, env, commit_message, source_branch)
+        updated = await self.update_shipment_data(shipment_configs, env, commit_message, source_branch)
+        if not updated:
+            # this should not happen
+            raise ValueError("Failed to update shipment data repo. Please investigate.")
 
         gl = gitlab.Gitlab(self.gitlab_url, private_token=self.gitlab_token)
         gl.auth()

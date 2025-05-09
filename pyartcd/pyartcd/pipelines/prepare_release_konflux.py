@@ -301,7 +301,7 @@ class PrepareReleaseKonfluxPipeline:
         find_builds_cmd = self._elliott_base_command + [
             "find-builds",
             "--kind=image",
-            "--payload" if payload else "--no-payload",
+            "--payload" if payload else "--non-payload",
         ]
         rc, stdout, stderr = await exectools.cmd_gather_async(find_builds_cmd)
         if stderr:

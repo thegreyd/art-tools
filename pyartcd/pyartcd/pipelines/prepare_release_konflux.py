@@ -7,7 +7,7 @@ from datetime import datetime
 from functools import cached_property
 from io import StringIO
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 import aiofiles
@@ -22,7 +22,7 @@ from artcommonlib.model import Model
 from artcommonlib.util import convert_remote_git_to_ssh, new_roundtrip_yaml_handler
 from doozerlib.backend.konflux_image_builder import KonfluxImageBuilder
 from elliottlib.errata_async import AsyncErrataAPI
-from elliottlib.shipment_model import Issue, Issues, ShipmentConfig
+from elliottlib.shipment_model import Issue, Issues, ShipmentConfig, Spec
 from ghapi.all import GhApi
 
 from pyartcd import constants
@@ -126,6 +126,7 @@ class PrepareReleaseKonfluxPipeline:
             'elliott',
             group_param,
             f'--assembly={self.assembly}',
+            f'--build-system=konflux',
             f'--working-dir={self.elliott_working_dir}',
             f'--data-path={self.build_data_repo_pull_url}',
         ]
@@ -225,6 +226,13 @@ class PrepareReleaseKonfluxPipeline:
             if live_id:
                 getattr(shipment.shipment.environments, env).liveID = live_id
 
+            # find builds for the advisory
+            if kind in ("image", "extras"):
+                snapshot_spec = await self.find_builds(kind)
+                shipment.shipment.snapshot.spec = snapshot_spec
+            else:
+                _LOGGER.warning("Shipment kind %s is not supported for build finding", kind)
+
             # find issues for the advisory
             issues = await self.find_issues(kind)
             shipment.shipment.data.releaseNotes.issues = issues
@@ -284,6 +292,34 @@ class PrepareReleaseKonfluxPipeline:
         out = yaml.load(stdout)
         shipment = ShipmentConfig(**out)
         return shipment
+
+    async def find_builds(self, kind: str) -> Spec:
+        if kind not in ("image", "extras"):
+            raise ValueError(f"Invalid kind: {kind}. Only image and extras are supported")
+        payload = True if kind == "image" else False
+
+        find_builds_cmd = self._elliott_base_command + [
+            "find-builds",
+            "--kind=image",
+            "--payload" if payload else "--no-payload",
+        ]
+        rc, stdout, stderr = await exectools.cmd_gather_async(find_builds_cmd)
+        if stderr:
+            _LOGGER.info("Shipment find-builds command stderr:\n %s", stderr)
+        if stdout:
+            _LOGGER.info("Shipment find-builds command stdout:\n %s", stdout)
+        if rc != 0:
+            raise RuntimeError(f"cmd failed with exit code {rc}: {find_builds_cmd}")
+
+        # stdout will be all builds separated by new line
+        builds = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            builds.append(line)
+
+        return Spec(nvrs=builds)
 
     async def find_issues(self, kind: str) -> Issues:
         if self._issues_by_kind:

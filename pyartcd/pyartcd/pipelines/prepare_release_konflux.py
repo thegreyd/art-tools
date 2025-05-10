@@ -3,7 +3,7 @@ import logging
 import os
 import re
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import cached_property
 from io import StringIO
 from pathlib import Path
@@ -443,7 +443,7 @@ class PrepareReleaseKonfluxPipeline:
         await self.clone_shipment_data()
 
         # Create branch name
-        timestamp = datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M%S')
+        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')
         source_branch = f"prepare-shipment-{self.assembly}-{timestamp}"
         target_branch = "main"
 

@@ -216,7 +216,7 @@ class PrepareReleaseKonfluxPipeline:
             if env == "prod" and not live_id:
                 _LOGGER.info("Requesting liveID for %s advisory", kind)
                 if self.dry_run:
-                    _LOGGER.warning("Dry run: Would've reserved liveID for %s advisory", kind)
+                    _LOGGER.info("[DRY-RUN] Would've reserved liveID for %s advisory", kind)
                     live_id = "DRY_RUN_LIVE_ID"
                 else:
                     live_id = await self._errata_api.reserve_live_id()
@@ -247,8 +247,7 @@ class PrepareReleaseKonfluxPipeline:
             _LOGGER.info("Shipment MR already exists: %s. Checking if it needs an update..", shipment_url)
             await self.update_shipment_mr(generated_shipments, env, shipment_url)
 
-        if shipments != group_config.get(shipment_key):
-            await self.create_update_build_data_pr(shipments)
+        await self.create_update_build_data_pr(shipments)
 
     @cached_property
     def _errata_api(self):
@@ -322,7 +321,7 @@ class PrepareReleaseKonfluxPipeline:
         return Spec(nvrs=builds)
 
     async def find_issues(self, kind: str) -> Issues:
-        if self._issues_by_kind:
+        if self._issues_by_kind is not None:
             return self._issues_by_kind.get(kind)
 
         find_bugs_cmd = self._elliott_base_command + [
@@ -339,7 +338,6 @@ class PrepareReleaseKonfluxPipeline:
             raise RuntimeError(f"cmd failed with exit code {rc}: {find_bugs_cmd}")
 
         self._issues_by_kind = {}
-        # in case of no bugs, stdout will be empty
         if stdout:
             for advisory_kind, bugs in json.loads(stdout).items():
                 if not bugs:
@@ -568,14 +566,14 @@ class PrepareReleaseKonfluxPipeline:
         # Push changes to a new branch
         cmd = ["-C", str(repo), "push", "-u", "push", branch]
         if self.dry_run:
-            _LOGGER.info("Would have created new branch upstream: %s", " ".join(cmd))
+            _LOGGER.info("[DRY-RUN] Would have created new branch upstream: %s", " ".join(cmd))
         else:
             _LOGGER.info("Pushing changes to upstream...")
             await run_git_async(cmd)
 
         return True
 
-    async def create_update_build_data_pr(self, shipments) -> bool:
+    async def create_update_build_data_pr(self, shipments: List[Dict]) -> bool:
         branch = f"update-shipment-{self.release_name}"
         updated = await self.update_build_data(shipments, branch)
 
@@ -602,7 +600,7 @@ class PrepareReleaseKonfluxPipeline:
                 pr_body += f"\n\nCreated by job: {self.job_url}"
 
             if self.dry_run:
-                _LOGGER.info("Dry run: Would have created a new PR with title '%s'", pr_title)
+                _LOGGER.info("[DRY-RUN] Would have created a new PR with title '%s'", pr_title)
             else:
                 result = api.pulls.create(
                     head=head,
@@ -617,7 +615,7 @@ class PrepareReleaseKonfluxPipeline:
             _LOGGER.info("Existing PR to update shipments found: %s", existing_prs.items[0].html_url)
             pull_number = existing_prs.items[0].number
             if self.dry_run:
-                _LOGGER.info("Dry run: Would have updated PR with number %s", pull_number)
+                _LOGGER.info("[DRY-RUN] Would have updated PR with number %s", pull_number)
             elif updated:
                 pr_body = existing_prs.items[0].body
                 if self.job_url:

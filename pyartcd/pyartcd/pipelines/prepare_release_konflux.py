@@ -83,10 +83,9 @@ class PrepareReleaseKonfluxPipeline:
             or self.runtime.config.get("shipment_config", {}).get("shipment_data_url")
             or SHIPMENT_DATA_URL_TEMPLATE.format(self.product)
         )
-        self.shipment_data_repo_push_url = (
-            self.runtime.config.get("shipment_config", {}).get("shipment_data_push_url")
-            or SHIPMENT_DATA_URL_TEMPLATE.format(self.product)
-        )
+        self.shipment_data_repo_push_url = self.runtime.config.get("shipment_config", {}).get(
+            "shipment_data_push_url"
+        ) or SHIPMENT_DATA_URL_TEMPLATE.format(self.product)
 
         self.github_token = os.environ.get('GITHUB_TOKEN')
         if not self.github_token:
@@ -126,7 +125,7 @@ class PrepareReleaseKonfluxPipeline:
             'elliott',
             group_param,
             f'--assembly={self.assembly}',
-            f'--build-system=konflux',
+            '--build-system=konflux',
             f'--working-dir={self.elliott_working_dir}',
             f'--data-path={self.build_data_repo_pull_url}',
         ]
@@ -301,6 +300,7 @@ class PrepareReleaseKonfluxPipeline:
             "find-builds",
             "--kind=image",
             "--payload" if payload else "--non-payload",
+            "--json=-",
         ]
         rc, stdout, stderr = await exectools.cmd_gather_async(find_builds_cmd)
         if stderr:
@@ -310,14 +310,10 @@ class PrepareReleaseKonfluxPipeline:
         if rc != 0:
             raise RuntimeError(f"cmd failed with exit code {rc}: {find_builds_cmd}")
 
-        # stdout will be all builds separated by new line
         builds = []
-        for line in stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            builds.append(line)
-
+        if stdout:
+            out = json.loads(stdout)
+            builds = out.get("builds", [])
         return Spec(nvrs=builds)
 
     async def find_issues(self, kind: str) -> Issues:

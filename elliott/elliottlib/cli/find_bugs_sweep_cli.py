@@ -171,7 +171,7 @@ async def find_bugs_sweep_cli(
 
     if report:
         print_report(bugs, output)
-    
+
     sys.exit(0)
 
 

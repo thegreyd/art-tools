@@ -27,7 +27,7 @@ type_bug_set = Set[Bug]
 @click.option(
     "--filter-attached/--no-filter-attached",
     is_flag=True,
-    default=True,
+    default=False,
     help="Filter out bugs that are already attached to advisories on ErrataTool",
 )
 @click.option(

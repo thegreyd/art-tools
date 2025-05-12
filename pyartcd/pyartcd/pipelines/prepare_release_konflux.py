@@ -321,9 +321,10 @@ class PrepareReleaseKonfluxPipeline:
             return self._issues_by_kind.get(kind)
 
         find_bugs_cmd = self._elliott_base_command + [
-            "find-bugs:sweep",
+            "find-bugs",
+            "--filter-attached",
+            "--permissive",
             "--output=json",
-            "--permissive",  # TODO: this will be decided based on advisory type, logic in prepare-release
         ]
         rc, stdout, stderr = await exectools.cmd_gather_async(find_bugs_cmd)
         if stderr:

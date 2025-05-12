@@ -330,7 +330,7 @@ def categorize_bugs_by_type(
     issues = []
 
     operator_bundle_advisory = "advance" if advance_release else "metadata"
-    bugs_by_type = {
+    bugs_by_type: Dict[str, type_bug_set] = {
         "rpm": set(),
         "image": set(),
         "extras": set(),

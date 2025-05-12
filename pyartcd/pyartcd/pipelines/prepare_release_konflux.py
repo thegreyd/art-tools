@@ -85,7 +85,7 @@ class PrepareReleaseKonfluxPipeline:
         )
         self.shipment_data_repo_push_url = (
             self.runtime.config.get("shipment_config", {}).get("shipment_data_push_url")
-            or self.shipment_data_repo_pull_url
+            or SHIPMENT_DATA_URL_TEMPLATE.format(self.product)
         )
 
         self.github_token = os.environ.get('GITHUB_TOKEN')

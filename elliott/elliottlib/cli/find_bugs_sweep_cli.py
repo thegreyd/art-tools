@@ -169,6 +169,9 @@ async def find_bugs_sweep_cli(
         click.echo(f"Found {len(bugs)} bugs")
         click.echo(", ".join(sorted(str(b.id) for b in bugs)))
 
+    if report:
+        print_report(bugs, output)
+    
     sys.exit(0)
 
 

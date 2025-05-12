@@ -1,13 +1,11 @@
 import json
-import sys
-import traceback
 from datetime import datetime, timezone
 from typing import Dict, List, Set
 
 import click
 from artcommonlib import arch_util, logutil
 from artcommonlib.assembly import assembly_issues_config
-from artcommonlib.format_util import green_prefix, green_print
+from artcommonlib.format_util import green_print
 
 from elliottlib import Runtime, bzutil, constants, errata
 from elliottlib.bzutil import Bug, BugTracker, JIRABug
@@ -73,7 +71,7 @@ class FindBugsSweep(FindBugsMode):
     required=False,
     type=click.Choice(['text', 'json', 'slack']),
     default='text',
-    help='Applies chosen format to --report output',
+    help='Output in the specified format',
 )
 @click.option(
     "--into-default-advisories",
@@ -138,7 +136,7 @@ async def find_bugs_sweep_cli(
     """
     count_advisory_attach_flags = sum(map(bool, [advisory_id, default_advisory_type, into_default_advisories]))
     if count_advisory_attach_flags > 1:
-        raise click.BadParameter("Use only one of --use-default-advisory, --add or --into-default-advisories")
+        raise click.BadParameter("Use only one of --use-default-advisory, --add, or --into-default-advisories")
 
     if runtime.build_system == 'konflux':
         raise click.BadParameter("Use find-bugs command instead of find-bugs:sweep for --build-system konflux")
@@ -158,20 +156,22 @@ async def find_bugs_sweep_cli(
         noop=noop,
         permissive=permissive,
         bug_tracker=bug_tracker,
+        advance_release=advance_release,
     )
+
+    formatted_bugs = sorted([b.id for b in bugs])
+
+    if report:
+        print_report(bugs, output)
+        return
 
     if output == 'text':
         click.echo(f"Found {len(bugs)} bugs")
         if bugs:
-            click.echo(", ".join(sorted(bugs)))
+            click.echo(", ".join(formatted_bugs))
     elif output == 'json':
-        bugs_dict_formatted = {key: sorted([b.id for b in bug_set]) for key, bug_set in bugs_dict.items()}
+        bugs_dict_formatted = {"bugs": formatted_bugs}
         click.echo(json.dumps(bugs_dict_formatted, indent=4))
-
-    if report:
-        print_report(bugs, output)
-
-    sys.exit(0)
 
 
 async def get_bugs_sweep(runtime: Runtime, find_bugs_obj, bug_tracker):
@@ -255,23 +255,20 @@ async def find_and_attach_bugs(
     logger.info(f"Searching {bug_tracker.type} for bugs with status {statuses} and target releases: {tr}\n")
 
     bugs = await get_bugs_sweep(runtime, find_bugs_obj, bug_tracker)
-    bugs_by_type = init_bugs_by_kind_dict(advance_release)
     if not bugs:
         logger.info(f"No qualified {bug_tracker.type} bugs found")
         return []
 
     advisory_ids = runtime.get_default_advisories()
     included_bug_ids, _ = get_assembly_bug_ids(runtime, bug_tracker_type=bug_tracker.type)
-    major_version, minor_version = runtime.get_major_minor()
-    categorize_bugs_by_type(
+    major_version, _ = runtime.get_major_minor()
+    bugs_by_type, _ = categorize_bugs_by_type(
         bugs,
-        bugs_by_type,
         advisory_ids,
         included_bug_ids,
-        noop,
         permissive=permissive,
         major_version=major_version,
-        minor_version=minor_version,
+        advance_release=advance_release,
     )
     for kind, kind_bugs in bugs_by_type.items():
         logger.info(f'{kind} bugs: {[b.id for b in kind_bugs]}')
@@ -319,10 +316,21 @@ def get_assembly_bug_ids(runtime, bug_tracker_type):
     return included_bug_ids, excluded_bug_ids
 
 
-def init_bugs_by_kind_dict(advance_release: bool = False) -> Dict[str, type_bug_set]:
-    """Returns a dict of {advisory_type: bugs}"""
+def categorize_bugs_by_type(
+    bugs: List[Bug],
+    advisory_id_map: Dict[str, int],
+    permitted_bug_ids=None,
+    major_version: int = 4,
+    permissive: bool = False,
+    advance_release: bool = False,
+):
+    """Categorize bugs into different types of advisories
+    :return: (bugs_by_type, issues) where bugs_by_type is a dict of {advisory_type: bugs} and issues is a list of issues
+    """
+    issues = []
+
     operator_bundle_advisory = "advance" if advance_release else "metadata"
-    return {
+    bugs_by_type = {
         "rpm": set(),
         "image": set(),
         "extras": set(),
@@ -334,22 +342,6 @@ def init_bugs_by_kind_dict(advance_release: bool = False) -> Dict[str, type_bug_
         operator_bundle_advisory: set(),
         "microshift": set(),
     }
-
-
-def categorize_bugs_by_type(
-    bugs: List[Bug],
-    bugs_by_type: Dict[str, type_bug_set],
-    advisory_id_map: Dict[str, int],
-    permitted_bug_ids,
-    noop,
-    major_version: int,
-    minor_version: int,
-    permissive=False,
-):
-    """Categorize bugs into different types of advisories
-    :return: (bugs_by_type, issues) where bugs_by_type is a dict of {advisory_type: bugs} and issues is a list of issues
-    """
-    issues = []
 
     # for 3.x, all bugs should go to the rpm advisory
     if int(major_version) < 4:
@@ -390,14 +382,6 @@ def categorize_bugs_by_type(
 
     for b in tracker_bugs:
         logger.info(f'Tracker bug, component: {(b.id, b.whiteboard_component)}')
-        # get summary of tracker-bug and update it if needed
-        summary_suffix = f"[openshift-{major_version}.{minor_version}]"
-        if not b.summary.endswith(summary_suffix):
-            new_s = fix_summary_suffix(b.summary, summary_suffix)
-            try:
-                b.update_summary(new_s, noop=noop)
-            except Exception as e:
-                logger.warning("Failed to fix summary: %s", str(e))
 
     if not advisory_id_map:
         logger.warning(

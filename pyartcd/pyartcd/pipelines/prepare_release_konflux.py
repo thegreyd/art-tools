@@ -75,7 +75,7 @@ class PrepareReleaseKonfluxPipeline:
             self.build_data_repo_pull_url, self.build_data_gitref = self.build_data_repo_pull_url.split("@", 1)
 
         self.build_data_repo_push_url = (
-            self.runtime.config.get("build_config", {}).get("ocp_build_data_push_url") or self.build_data_repo_pull_url
+            self.runtime.config.get("build_config", {}).get("ocp_build_data_push_url") or constants.OCP_BUILD_DATA_URL
         )
 
         self.shipment_data_repo_pull_url = (
@@ -511,7 +511,7 @@ class PrepareReleaseKonfluxPipeline:
         # setup push remote
         parsed_url = urlparse(self.shipment_data_repo_push_url)
         scheme = parsed_url.scheme
-        rest_of_the_url = self.shipment_data_repo_pull_url[len(scheme + "://") :]
+        rest_of_the_url = self.shipment_data_repo_push_url[len(scheme + "://") :]
         push_url = f'https://oauth2:{self.gitlab_token}@{rest_of_the_url}'
         await run_git_async(["-C", str(self._shipment_repo_dir), "remote", "add", "push", push_url])
 

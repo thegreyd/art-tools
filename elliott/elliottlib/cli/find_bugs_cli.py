@@ -28,7 +28,7 @@ type_bug_set = Set[Bug]
     "--filter-attached/--no-filter-attached",
     is_flag=True,
     default=True,
-    help="Try and filter out bugs that are attached/associated with other advisories",
+    help="Filter out bugs that are already attached to advisories on ErrataTool",
 )
 @click.option(
     "--permissive",
@@ -127,7 +127,7 @@ class FindBugsCli:
         tr = self.bug_tracker.target_release()
         LOGGER.info(f"Searching {self.bug_tracker.type} for bugs with status {statuses} and target releases: {tr}\n")
 
-        bugs = await get_bugs_sweep(self.runtime, find_bugs_obj, self.bug_tracker)
+        bugs = await get_bugs_sweep(self.runtime, find_bugs_obj, self.bug_tracker, filter_attached=self.filter_attached)
         advisory_ids = self.runtime.get_default_advisories()
         included_bug_ids, _ = get_assembly_bug_ids(self.runtime, bug_tracker_type=self.bug_tracker.type)
         major_version, _ = self.runtime.get_major_minor()

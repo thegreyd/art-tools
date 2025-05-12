@@ -1,11 +1,13 @@
 import json
+import sys
+import traceback
 from datetime import datetime, timezone
 from typing import Dict, List, Set
 
 import click
 from artcommonlib import arch_util, logutil
 from artcommonlib.assembly import assembly_issues_config
-from artcommonlib.format_util import green_print
+from artcommonlib.format_util import green_prefix, green_print
 
 from elliottlib import Runtime, bzutil, constants, errata
 from elliottlib.bzutil import Bug, BugTracker, JIRABug
@@ -71,7 +73,7 @@ class FindBugsSweep(FindBugsMode):
     required=False,
     type=click.Choice(['text', 'json', 'slack']),
     default='text',
-    help='Output in the specified format',
+    help='Applies chosen format to --report output',
 )
 @click.option(
     "--into-default-advisories",
@@ -159,22 +161,25 @@ async def find_bugs_sweep_cli(
         advance_release=advance_release,
     )
 
-    formatted_bugs = sorted([b.id for b in bugs])
-
-    if report:
-        print_report(bugs, output)
-        return
+    if not bugs:
+        logger.info('No bugs found')
+        sys.exit(0)
 
     if output == 'text':
         click.echo(f"Found {len(bugs)} bugs")
-        if bugs:
-            click.echo(", ".join(formatted_bugs))
-    elif output == 'json':
-        bugs_dict_formatted = {"bugs": formatted_bugs}
-        click.echo(json.dumps(bugs_dict_formatted, indent=4))
+        click.echo(", ".join(sorted(str(b.id) for b in bugs)))
+
+    sys.exit(0)
 
 
-async def get_bugs_sweep(runtime: Runtime, find_bugs_obj, bug_tracker):
+async def get_bugs_sweep(
+    runtime: Runtime,
+    find_bugs_obj: FindBugsMode,
+    bug_tracker: BugTracker,
+    filter_attached: bool = True,
+) -> List[Bug]:
+    """Find bugs based on the given find_bugs_obj and bug tracker for the given assembly."""
+
     bugs = find_bugs_obj.search(bug_tracker_obj=bug_tracker, verbose=runtime.debug)
     if bugs:
         sweep_cutoff_timestamp = await get_sweep_cutoff_timestamp(runtime)
@@ -198,14 +203,15 @@ async def get_bugs_sweep(runtime: Runtime, find_bugs_obj, bug_tracker):
             logger.info(f"{len(qualified_bugs)} of {len(bugs)} bugs are qualified for the cutoff time {utc_ts}")
             bugs = qualified_bugs
 
-        # filter bugs that have been swept into other advisories
-        logger.info("Filtering bugs that haven't been attached to any advisories...")
-        attached_bugs = await bug_tracker.filter_attached_bugs(bugs)
-        if attached_bugs:
-            attached_bug_ids = {b.id for b in attached_bugs}
-            logger.debug(f"Bugs attached to other advisories: {sorted(attached_bug_ids)}")
-            bugs = [b for b in bugs if b.id not in attached_bug_ids]
-            logger.info(f"Filtered {len(attached_bugs)} bugs since they are attached to other advisories")
+        if filter_attached:
+            # filter bugs that have been swept into other advisories
+            logger.info("Filtering bugs that haven't been attached to any advisories...")
+            attached_bugs = await bug_tracker.filter_attached_bugs(bugs)
+            if attached_bugs:
+                attached_bug_ids = {b.id for b in attached_bugs}
+                logger.debug(f"Bugs attached to other advisories: {sorted(attached_bug_ids)}")
+                bugs = [b for b in bugs if b.id not in attached_bug_ids]
+                logger.info(f"Filtered {len(attached_bugs)} bugs since they are attached to other advisories")
 
     included_bug_ids, excluded_bug_ids = get_assembly_bug_ids(runtime, bug_tracker_type=bug_tracker.type)
     if included_bug_ids & excluded_bug_ids:

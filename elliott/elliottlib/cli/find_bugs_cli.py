@@ -14,6 +14,7 @@ from elliottlib.cli.find_bugs_sweep_cli import (
     get_assembly_bug_ids,
     get_bugs_sweep,
 )
+from elliottlib.errata import get_advisory_nvrs
 
 LOGGER = logutil.get_logger(__name__)
 type_bug_list = List[Bug]
@@ -113,6 +114,38 @@ class FindBugsCli:
             if bugs:
                 click.echo(", ".join(sorted(bugs)))
 
+    def get_builds_by_advisory_kind(self) -> Dict[str, Dict]:
+        advisory_id_by_kind = self.runtime.get_default_advisories()
+        builds_by_advisory_kind = {}
+        if self.runtime.build_system == "brew":
+            for kind, advisory_id in advisory_id_by_kind.items():
+                if not advisory_id:
+                    continue
+            builds_by_advisory_kind[kind] = get_advisory_nvrs(advisory_id)
+        else:
+            group_config = (
+                self.releases_config["releases"][self.assembly].setdefault("assembly", {}).setdefault("group", {})
+            )
+            shipments = group_config.get("shipments", [])
+
+            # restrict to only one shipment for now
+            if len(shipments) != 1:
+                raise ValueError("Operation not supported: shipments should have atleast and only one entry (for now)")
+
+            shipment_config = shipments[0]
+            shipment_url = shipment_config.get("url", "")
+            if not shipment_url:
+                LOGGER.info(
+                    "No shipment MR found in the group config for the assembly. This will disable tracker bug categorization."
+                )
+                return builds_by_advisory_kind
+            shipment_advisory_kinds = {advisory.get("kind") for advisory in shipment_config.get("advisories", [])}
+            for kind in shipment_advisory_kinds:
+                builds_by_advisory_kind[kind] = self.get_builds_from_shipment_mr(kind, shipment_url)
+
+    def get_builds_from_shipment_mr(self, kind: str, shipment_mr_url: str) -> Dict:
+        pass
+
     async def find_bugs(self) -> Dict[str | int, type_bug_set]:
         """Find bugs based on the given find_bugs_obj and bug_tracker.
         Attach them to the advisory if specified.
@@ -131,9 +164,11 @@ class FindBugsCli:
         advisory_ids = self.runtime.get_default_advisories()
         included_bug_ids, _ = get_assembly_bug_ids(self.runtime, bug_tracker_type=self.bug_tracker.type)
         major_version, _ = self.runtime.get_major_minor()
+
+        builds_by_advisory_kind = self.get_builds_by_advisory_kind()
         bugs_by_type, _ = categorize_bugs_by_type(
             bugs,
-            advisory_ids,
+            builds_by_advisory_kind,
             included_bug_ids,
             permissive=self.permissive,
             major_version=major_version,

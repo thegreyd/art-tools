@@ -259,6 +259,10 @@ async def find_and_attach_bugs(
     bug_tracker: BugTracker,
     advance_release: bool,
 ) -> List[Bug]:
+    """Find bugs based on the given find_bugs_obj and bug tracker for the given assembly.
+    Attach them to the ErrataTool advisory/advisories if specified.
+    """
+
     statuses = sorted(find_bugs_obj.status)
     tr = bug_tracker.target_release()
     logger.info(f"Searching {bug_tracker.type} for bugs with status {statuses} and target releases: {tr}\n")
@@ -271,6 +275,13 @@ async def find_and_attach_bugs(
     advisory_ids = runtime.get_default_advisories()
     included_bug_ids, _ = get_assembly_bug_ids(runtime, bug_tracker_type=bug_tracker.type)
     major_version, _ = runtime.get_major_minor()
+
+    builds_by_advisory_kind = {}
+    for kind, advisory_id in advisory_ids.items():
+        if not advisory_id:
+            continue
+        builds_by_advisory_kind[kind] = errata.get_advisory_nvrs(advisory_id)
+
     bugs_by_type, _ = categorize_bugs_by_type(
         bugs,
         advisory_ids,
@@ -327,7 +338,7 @@ def get_assembly_bug_ids(runtime, bug_tracker_type):
 
 def categorize_bugs_by_type(
     bugs: List[Bug],
-    advisory_id_map: Dict[str, int],
+    builds_by_advisory_kind: Dict[str, List[str]],
     permitted_bug_ids=None,
     major_version: int = 4,
     permissive: bool = False,
@@ -392,9 +403,9 @@ def categorize_bugs_by_type(
     for b in tracker_bugs:
         logger.info(f'Tracker bug, component: {(b.id, b.whiteboard_component)}')
 
-    if not advisory_id_map:
+    if not builds_by_advisory_kind:
         logger.warning(
-            "Skipping categorizing Tracker Bugs; advisories with attached builds must be given for this operation."
+            "Skipping categorizing tracker bugs: builds attached to advisories must be given for this operation."
         )
         return bugs_by_type, issues
 
@@ -403,10 +414,7 @@ def categorize_bugs_by_type(
     for kind in bugs_by_type.keys():
         if len(found) == len(tracker_bugs):
             break
-        advisory = advisory_id_map.get(kind)
-        if not advisory:
-            continue
-        attached_builds = errata.get_advisory_nvrs(advisory)
+        attached_builds = builds_by_advisory_kind[kind]
         packages = set(attached_builds.keys())
         exception_packages = []
         if kind == 'image':
@@ -420,7 +428,7 @@ def categorize_bugs_by_type(
                 # microshift is special since it has a separate advisory, and it's build is attached
                 # after payload is promoted. So do not pre-emptively complain
                 logger.info(
-                    f"skip attach microshift bug {bug.id} to {advisory} because this advisory has no builds attached"
+                    f"skip categorizing microshift tracker bug {bug.id} to {kind} advisory because it has no builds attached"
                 )
                 found.add(bug)
             elif (package_name in packages) or (package_name in exception_packages):

@@ -16,7 +16,7 @@ from elliottlib.bzutil import Bug
 from elliottlib.cli.attach_cve_flaws_cli import get_flaws
 from elliottlib.cli.common import cli, click_coroutine, pass_runtime
 from elliottlib.cli.find_bugs_sweep_cli import FindBugsSweep, categorize_bugs_by_type
-from elliottlib.errata import get_bug_ids, is_advisory_editable, sync_jira_issue
+from elliottlib.errata import get_advisory_nvrs, get_bug_ids, is_advisory_editable, sync_jira_issue
 from elliottlib.errata_async import AsyncErrataAPI, AsyncErrataUtils
 from elliottlib.runtime import Runtime
 from elliottlib.util import minor_version_tuple
@@ -270,9 +270,16 @@ class BugValidator:
         advance_release = False
         if "advance" in advisory_id_map and is_advisory_editable(advisory_id_map["advance"]):
             advance_release = True
+
+        builds_by_advisory_kind = {}
+        for kind, advisory_id in advisory_id_map.items():
+            if not advisory_id:
+                continue
+            builds_by_advisory_kind[kind] = get_advisory_nvrs(advisory_id)
+
         bugs_by_type, issues = categorize_bugs_by_type(
             non_flaw_bugs,
-            advisory_id_map,
+            builds_by_advisory_kind,
             permitted_bug_ids=permitted_bug_ids,
             permissive=True,
             advance_release=advance_release,

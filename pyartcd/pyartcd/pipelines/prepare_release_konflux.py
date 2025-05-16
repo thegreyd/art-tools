@@ -125,21 +125,25 @@ class PrepareReleaseKonfluxPipeline:
         return shipment_repo_pull_url, shipment_repo_push_url
 
     @cached_property
+    def _errata_api(self) -> AsyncErrataAPI:
+        return AsyncErrataAPI()
+
+    @cached_property
     def _gitlab(self) -> gitlab.Gitlab:
         gl = gitlab.Gitlab(self.gitlab_url, private_token=self.gitlab_token)
         gl.auth()
         return gl
 
     @property
-    def release_name(self):
+    def release_name(self) -> str:
         return get_release_name_for_assembly(self.group, self.releases_config, self.assembly)
 
     @property
-    def assembly_group_config(self):
+    def assembly_group_config(self) -> dict:
         return self.releases_config["releases"][self.assembly].setdefault("assembly", {}).setdefault("group", {})
 
     @property
-    def shipment_config(self):
+    def shipment_config(self) -> dict:
         shipment_key = next(k for k in self.assembly_group_config.keys() if k.startswith("shipment"))
         return self.assembly_group_config.get(shipment_key, [])
 
@@ -249,7 +253,9 @@ class PrepareReleaseKonfluxPipeline:
             generated_shipments[kind] = shipment
 
         # close errata API connection now that we have the liveIDs
-        self._errata_api.close()
+        # since it's a cached_property, check if it got initialized
+        if "_errata_api" in self.__dict__:
+            self._errata_api.close()
 
         if not shipment_url or shipment_url == "N/A":
             shipment_mr_url = await self.create_shipment_mr(generated_shipments, env)
@@ -262,10 +268,6 @@ class PrepareReleaseKonfluxPipeline:
                 await self._slack_client.say_in_thread(f"Shipment MR updated: {shipment_url}")
 
         await self.create_update_build_data_pr(shipment_config)
-
-    @cached_property
-    def _errata_api(self):
-        return AsyncErrataAPI()
 
     async def init_shipment(self, kind: str) -> ShipmentConfig:
         create_cmd = self._elliott_base_command + [

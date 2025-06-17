@@ -301,7 +301,7 @@ class PrepareReleaseKonfluxPipeline:
             shipment.shipment.snapshot.spec = snapshot_spec
         else:
             _LOGGER.warning("Shipment kind %s is not supported for build finding", kind)
-        
+
         # find issues for the advisory
         shipment.shipment.data.releaseNotes.issues = await self.find_issues(kind)
 

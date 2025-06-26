@@ -53,7 +53,7 @@ class KonfluxOlmBundleRebaser:
         self.dry_run = dry_run
         self._logger = logger
 
-    async def rebase(self, metadata: ImageMetadata, operator_build: KonfluxBuildRecord, input_release: str):
+    async def rebase(self, metadata: ImageMetadata, operator_build: KonfluxBuildRecord, input_release: str) -> str:
         """Rebase an operator with Konflux.
 
         :param metadata: The metadata of the operator to rebase.
@@ -109,12 +109,13 @@ class KonfluxOlmBundleRebaser:
         logger.info("Cleaning bundle build directory...")
         await bundle_build_repo.delete_all_files()
         logger.info("Rebasing bundle content...")
-        await self._rebase_dir(metadata, operator_dir, bundle_dir, operator_build, input_release)
+        nvr = await self._rebase_dir(metadata, operator_dir, bundle_dir, operator_build, input_release)
         # commit and push the changes
         logger.info("Committing and pushing bundle content...")
         await bundle_build_repo.commit(f"Update bundle manifests for {operator_build.nvr}", allow_empty=True)
         if not self.dry_run:
             await bundle_build_repo.push()
+        return nvr
 
     async def _rebase_dir(
         self,
@@ -123,7 +124,7 @@ class KonfluxOlmBundleRebaser:
         bundle_dir: Path,
         operator_build: KonfluxBuildRecord,
         input_release: str,
-    ):
+    ) -> str:
         """Rebase an operator directory with Konflux."""
         csv_config = metadata.config.get('update-csv')
         if not csv_config:
@@ -219,12 +220,13 @@ class KonfluxOlmBundleRebaser:
             await f.write(yaml.safe_dump({'annotations': operator_framework_tags}))
 
         # Generate bundle's Dockerfile
-        await asyncio.to_thread(
+        nvr = await asyncio.to_thread(
             self._create_dockerfile, metadata, operator_dir, bundle_dir, operator_framework_tags, input_release
         )
 
         # Write .oit files. Those files are used by Doozer for additional information about the bundle
         await self._create_oit_files(package_name, csv_name, bundle_dir, operator_build.nvr, all_found_operands)
+        return nvr
 
     async def _create_oit_files(
         self,
@@ -390,11 +392,16 @@ class KonfluxOlmBundleRebaser:
         bundle_dir: Path,
         operator_framework_tags: Dict[str, str],
         input_release: str,
-    ):
+    ) -> str:
         operator_df = DockerfileParser(str(operator_dir.joinpath('Dockerfile')))
         bundle_df = DockerfileParser(str(bundle_dir.joinpath('Dockerfile')))
 
         bundle_df.content = 'FROM scratch\nCOPY ./manifests /manifests\nCOPY ./metadata /metadata'
+
+        component_name = metadata.get_olm_bundle_brew_component_name()
+        bundle_name = metadata.get_olm_bundle_image_name()
+        bundle_version = f'{operator_df.labels["version"]}.{operator_df.labels["release"]}'
+        bundle_release = input_release
 
         # Copy the operator's Dockerfile labels to the bundle's Dockerfile
         # and add additional labels required by the bundle
@@ -402,12 +409,16 @@ class KonfluxOlmBundleRebaser:
             **operator_df.labels,
             **self._redhat_delivery_tags,
             **operator_framework_tags,
-            'com.redhat.component': metadata.get_olm_bundle_brew_component_name(),
+            'com.redhat.component': component_name,
             'com.redhat.delivery.appregistry': '',  # This is a bundle, not an operator
-            'name': (bundle_name := metadata.get_olm_bundle_image_name()),
-            'version': (bundle_version := f'{operator_df.labels["version"]}.{operator_df.labels["release"]}'),
-            'release': input_release,
+            'name': bundle_name,
+            'version': bundle_version,
+            'release': bundle_release,
         }
+
+        # NVR is constructed from the component name, version, and release
+        # and not the `name` label
+        nvr = f'{component_name}-{bundle_version}-{bundle_release}'
 
         # The following labels are required by Conforma
         if 'distribution-scope' not in bundle_df.labels:
@@ -419,6 +430,8 @@ class KonfluxOlmBundleRebaser:
             bundle_df.labels['url'] = (
                 f'https://access.redhat.com/containers/#/registry.access.redhat.com/{bundle_name}/images/{bundle_version}-{input_release}'
             )
+
+        return nvr
 
 
 class KonfluxOlmBundleBuildError(Exception):

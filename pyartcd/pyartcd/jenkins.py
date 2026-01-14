@@ -33,6 +33,7 @@ class Jobs(Enum):
     OCP4 = 'aos-cd-builds/build%2Focp4'
     OKD4 = 'aos-cd-builds/build%2Fokd4'
     OCP4_KONFLUX = 'aos-cd-builds/build%2Focp4-konflux'
+    OCP5 = 'aos-cd-builds/build%2Focp5'
     OCP4_SCAN = 'aos-cd-builds/build%2Focp4_scan'
     OCP4_SCAN_KONFLUX = 'aos-cd-builds/build%2Focp4-scan-konflux'
     RHCOS = 'aos-cd-builds/build%2Frhcos'
@@ -429,6 +430,45 @@ def start_ocp4_konflux(
 
     return start_build(
         job=Jobs.OCP4_KONFLUX,
+        params=params,
+        **kwargs,
+    )
+
+
+def start_ocp5(
+    build_version: str,
+    assembly: str,
+    image_list: list,
+    rpm_list: list = None,
+    limit_arches: list = None,
+    dry_run: bool = False,
+    **kwargs,
+) -> Optional[str]:
+    params = {
+        'BUILD_VERSION': build_version,
+        'ASSEMBLY': assembly,
+    }
+
+    # Build only changed images or none
+    if image_list:
+        params['IMAGE_LIST'] = ','.join(image_list)
+
+    # Build changed RPMs if any
+    if rpm_list:
+        params['RPM_BUILD_STRATEGY'] = 'only'
+        params['RPM_LIST'] = ','.join(rpm_list)
+
+    # Limit arches when requested
+    if limit_arches:
+        params['LIMIT_ARCHES'] = ','.join(limit_arches)
+
+    # SKIP_PLASHETS defaults to True for manual builds, setting to False for scheduled
+    params['SKIP_PLASHETS'] = False
+
+    params['DRY_RUN'] = dry_run
+
+    return start_build(
+        job=Jobs.OCP5,
         params=params,
         **kwargs,
     )

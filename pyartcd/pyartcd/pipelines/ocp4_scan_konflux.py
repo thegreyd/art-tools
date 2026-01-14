@@ -144,15 +144,25 @@ class Ocp4ScanPipeline:
         jenkins.update_title(' [SOURCE CHANGES]')
         self.logger.info('Detected at least one updated image')
 
-        # Trigger ocp4/okd4 jobs
-        # Do NOT trigger builds in dry-run mode
-        if self.runtime.dry_run:
-            self.logger.info('Would have triggered a %s ocp4 build', self.version)
-            self.logger.info('Would have triggered a %s okd4 build', self.version)
-            return
+        # Determine major version to call the appropriate job
+        major_version = int(self.version.split('.')[0])
 
-        self.trigger_ocp4()
-        self.trigger_okd4()
+        # Trigger jobs based on major version
+        match major_version:
+            case 5:
+                if self.runtime.dry_run:
+                    self.logger.info('Would have triggered a %s ocp5 build', self.version)
+                else:
+                    self.trigger_ocp5()
+            case 4:
+                if self.runtime.dry_run:
+                    self.logger.info('Would have triggered a %s ocp4 build', self.version)
+                    self.logger.info('Would have triggered a %s okd4 build', self.version)
+                else:
+                    self.trigger_ocp4()
+                    self.trigger_okd4()
+            case _:
+                raise ValueError(f'Unsupported OCP major version: {major_version}')
 
     def trigger_ocp4(self):
         image_list = self.changes.get('images', [])
@@ -164,6 +174,22 @@ class Ocp4ScanPipeline:
         # Trigger ocp4-konflux
         self.logger.info('Triggering a %s ocp4-konflux build', self.version)
         jenkins.start_ocp4_konflux(
+            build_version=self.version,
+            assembly='stream',
+            image_list=image_list,
+            rpm_list=rpm_list,
+        )
+
+    def trigger_ocp5(self):
+        image_list = self.changes.get('images', [])
+        rpm_list = self.changes.get('rpms', [])
+
+        # Update build description
+        jenkins.update_description(f'Changed {len(image_list)} images<br/>')
+
+        # Trigger ocp5
+        self.logger.info('Triggering a %s ocp5 build', self.version)
+        jenkins.start_ocp5(
             build_version=self.version,
             assembly='stream',
             image_list=image_list,

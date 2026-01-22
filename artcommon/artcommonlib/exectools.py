@@ -92,9 +92,13 @@ def urlopen_assert(url_or_req, httpcode=200, retries=3):
     :param retries: The number of retries to permit
     :return: The success result of urlopen (or a RetryException will be thrown)
     """
-    return retry(
-        retries, lambda: urlopen(url_or_req), check_f=lambda req: req.code == httpcode, wait_f=lambda x: time.sleep(30)
-    )
+    url_str = url_or_req.full_url if hasattr(url_or_req, 'full_url') else str(url_or_req)
+    try:
+        return retry(
+            retries, lambda: urlopen(url_or_req), check_f=lambda req: req.code == httpcode, wait_f=lambda x: time.sleep(30)
+        )
+    except RetryException as e:
+        raise RetryException(f"Giving up after {retries} failed attempt(s) for URL: {url_str}") from e
 
 
 def cmd_assert(

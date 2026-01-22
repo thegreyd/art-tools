@@ -137,6 +137,7 @@ class TestGenAssemblyCli(TestCase):
 
         runtime = MagicMock()
         runtime.get_minor_version.return_value = '4.12'
+        runtime.get_major_minor_fields.return_value = (4, 12)
         gacli = flexmock(
             GenAssemblyCli(
                 runtime=runtime,
@@ -155,6 +156,7 @@ class TestGenAssemblyCli(TestCase):
 
         runtime = MagicMock()
         runtime.get_minor_version.return_value = '4.13'
+        runtime.get_major_minor_fields.return_value = (4, 13)
 
         gacli = GenAssemblyCli(
             runtime=runtime,
@@ -187,6 +189,23 @@ class TestGenAssemblyCli(TestCase):
             {
                 'x86_64': '4.13.0-0.nightly-2022-12-01-153811',
                 'aarch64': '4.13.0-0.nightly-arm64-2022-12-05-151453',
+            },
+        )
+
+    def test_nightly_release_pullspecs_ocp5(self):
+        runtime = MagicMock()
+        runtime.get_minor_version.return_value = '5.0'
+        runtime.get_major_minor_fields.return_value = (5, 0)
+
+        gacli = GenAssemblyCli(
+            runtime=runtime,
+            nightlies=['5.0.0-0.nightly-2022-12-01-153811'],
+        )
+        gacli._get_release_pullspecs()
+        self.assertEqual(
+            gacli.release_pullspecs,
+            {
+                'x86_64': 'registry.ci.openshift.org/ocp/release-5:5.0.0-0.nightly-2022-12-01-153811',
             },
         )
 

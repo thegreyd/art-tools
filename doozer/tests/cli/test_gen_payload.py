@@ -142,12 +142,82 @@ class TestGenPayloadCli(IsolatedAsyncioTestCase):
     @patch("doozerlib.cli.release_gen_payload.PayloadGenerator.find_mismatched_siblings")
     def test_detect_mismatched_siblings(self, fms_mock):
         gpcli = rgp_cli.GenPayloadCli(runtime=MagicMock(assembly="stream"))
-        ai = flexmock(Mock(AssemblyInspector), get_group_release_images={})
+        payload_img = self._make_sibling_inspector(
+            "https://github.com/openshift/repo.git", "aaa", "payload-img", is_payload=True
+        )
+        ai = flexmock(Mock(AssemblyInspector), get_group_release_images={"payload-img": payload_img})
         bbii = flexmock(Mock(BrewBuildRecordInspector), get_nvr="spam-1.0", get_source_git_commit="spamcommit")
         fms_mock.return_value = [(bbii, bbii)]
 
         gpcli.detect_mismatched_siblings(ai)
         self.assertIsInstance(gpcli.assembly_issues[-1], AssemblyIssue)
+        fms_mock.assert_called_once_with([payload_img])
+
+    @patch("doozerlib.cli.release_gen_payload.PayloadGenerator.find_mismatched_siblings")
+    def test_detect_mismatched_siblings_skips_non_payload(self, fms_mock):
+        """Non-payload images should be excluded from the sibling mismatch check."""
+        gpcli = rgp_cli.GenPayloadCli(runtime=MagicMock(assembly="stream"))
+        non_payload = self._make_sibling_inspector(
+            "https://github.com/openshift/repo.git", "aaa", "non-payload-img", is_payload=False
+        )
+        ai = flexmock(Mock(AssemblyInspector), get_group_release_images={"non-payload-img": non_payload})
+        fms_mock.return_value = []
+
+        gpcli.detect_mismatched_siblings(ai)
+        fms_mock.assert_called_once_with([])
+        self.assertEqual(len(gpcli.assembly_issues), 0)
+
+    def _make_sibling_inspector(self, source_url, commit, distgit_key, allow_mismatched=False, is_payload=True):
+        """Helper to build a mock BuildRecordInspector for sibling tests."""
+        source_config = dict(
+            git=dict(url=source_url),
+        )
+        if allow_mismatched:
+            source_config['allow_mismatched_siblings'] = True
+        raw_config = Model(dict(content=dict(source=source_config)))
+        meta = MagicMock()
+        meta.raw_config = raw_config
+        meta.distgit_key = distgit_key
+        meta.is_payload = is_payload
+        inspector = MagicMock()
+        inspector.get_image_meta.return_value = meta
+        inspector.get_source_git_commit.return_value = commit
+        inspector.get_nvr.return_value = f"{distgit_key}-v1.0-1"
+        return inspector
+
+    def test_find_mismatched_siblings_detects_mismatch(self):
+        """Two images from the same repo at different commits should be flagged."""
+        img_a = self._make_sibling_inspector("https://github.com/openshift/repo.git", "aaa", "image-a")
+        img_b = self._make_sibling_inspector("https://github.com/openshift/repo.git", "bbb", "image-b")
+        result = rgp_cli.PayloadGenerator.find_mismatched_siblings([img_a, img_b])
+        self.assertEqual(len(result), 1)
+
+    def test_find_mismatched_siblings_no_mismatch_same_commit(self):
+        """Two images from the same repo at the same commit should not be flagged."""
+        img_a = self._make_sibling_inspector("https://github.com/openshift/repo.git", "aaa", "image-a")
+        img_b = self._make_sibling_inspector("https://github.com/openshift/repo.git", "aaa", "image-b")
+        result = rgp_cli.PayloadGenerator.find_mismatched_siblings([img_a, img_b])
+        self.assertEqual(len(result), 0)
+
+    def test_find_mismatched_siblings_allow_flag_suppresses(self):
+        """An image with allow_mismatched_siblings should be excluded from sibling comparison."""
+        img_a = self._make_sibling_inspector("https://github.com/openshift/repo.git", "aaa", "image-a")
+        img_b = self._make_sibling_inspector(
+            "https://github.com/openshift/repo.git", "bbb", "image-b", allow_mismatched=True
+        )
+        result = rgp_cli.PayloadGenerator.find_mismatched_siblings([img_a, img_b])
+        self.assertEqual(len(result), 0, "allow_mismatched_siblings flag should suppress the mismatch")
+
+    def test_find_mismatched_siblings_allow_flag_only_on_flagged(self):
+        """The flag only excludes the flagged image; unflagged siblings from different repos still compare."""
+        img_a = self._make_sibling_inspector("https://github.com/openshift/repo.git", "aaa", "image-a")
+        img_b = self._make_sibling_inspector(
+            "https://github.com/openshift/repo.git", "bbb", "image-b", allow_mismatched=True
+        )
+        img_c = self._make_sibling_inspector("https://github.com/openshift/other.git", "ccc", "image-c")
+        img_d = self._make_sibling_inspector("https://github.com/openshift/other.git", "ddd", "image-d")
+        result = rgp_cli.PayloadGenerator.find_mismatched_siblings([img_a, img_b, img_c, img_d])
+        self.assertEqual(len(result), 1, "only unflagged siblings from other.git should mismatch")
 
     def test_id_tags_list(self):
         gpcli = rgp_cli.GenPayloadCli()
@@ -797,29 +867,39 @@ spec:
     @patch("artcommonlib.exectools.cmd_assert_async")
     @patch("aiofiles.open")
     async def test_create_multi_manifest_list(self, open_mock, exec_mock, fmlsha_mock):
-        os.environ['XDG_RUNTIME_DIR'] = 'fake'
-        runtime = MagicMock(uuid="uuid")
-        gpcli = rgp_cli.GenPayloadCli(runtime, output_dir="/tmp", organization="org", repository="repo")
+        with patch.dict(os.environ, {"QUAY_AUTH_FILE": "/tmp/quay-auth.json"}, clear=True):
+            runtime = MagicMock(uuid="uuid")
+            gpcli = rgp_cli.GenPayloadCli(runtime, output_dir="/tmp", organization="org", repository="repo")
 
-        buffer = io.StringIO()
-        open_mock.return_value.__aenter__.return_value.write = AsyncMock(side_effect=lambda s: buffer.write(s))
-        exec_mock.return_value = None  # do not actually run the command
-        fmlsha_mock.return_value = "sha256:abcdef"
+            buffer = io.StringIO()
+            open_mock.return_value.__aenter__.return_value.write = AsyncMock(side_effect=lambda s: buffer.write(s))
+            exec_mock.return_value = None  # do not actually run the command
+            fmlsha_mock.return_value = "sha256:abcdef"
 
-        arch_to_payload_entry = dict(
-            s390x=rgp_cli.PayloadEntry(
-                issues=[],
-                dest_pullspec="quay.io/org/repo:eggs-s390x",
-            ),
-            ppc64le=rgp_cli.PayloadEntry(
-                issues=[],
-                dest_pullspec="quay.io/org/repo:eggs-ppc64le",
-            ),
-        )
-        await gpcli.create_multi_manifest_list("spam", arch_to_payload_entry, "ocp-multi")
+            arch_to_payload_entry = dict(
+                s390x=rgp_cli.PayloadEntry(
+                    issues=[],
+                    dest_pullspec="quay.io/org/repo:eggs-s390x",
+                ),
+                ppc64le=rgp_cli.PayloadEntry(
+                    issues=[],
+                    dest_pullspec="quay.io/org/repo:eggs-ppc64le",
+                ),
+            )
+            await gpcli.create_multi_manifest_list("spam", arch_to_payload_entry, "ocp-multi")
+
         self.assertEqual(
-            exec_mock.call_args[0][0], "manifest-tool  push from-spec /tmp/ocp-multi.spam.manifest-list.yaml"
+            exec_mock.call_args[0][0],
+            [
+                "manifest-tool",
+                "--docker-cfg=/tmp/quay-auth.json",
+                "push",
+                "from-spec",
+                "/tmp/ocp-multi.spam.manifest-list.yaml",
+            ],
         )
+        fmlsha_mock.assert_awaited_once()
+        self.assertEqual(fmlsha_mock.await_args.kwargs["registry_config"], "/tmp/quay-auth.json")
         ml = yaml.safe_load(buffer.getvalue())
         self.assertRegex(ml["image"], r"^quay.io/org/repo:sha256-")
         self.assertEqual(len(ml["manifests"]), 2)
@@ -857,21 +937,32 @@ spec:
     async def test_create_multi_release_manifest_list(
         self, open_mock, exec_mock, mirror_payload_content_mock, fmlsha_mock
     ):
-        os.environ['XDG_RUNTIME_DIR'] = 'fake'
-        gpcli = rgp_cli.GenPayloadCli(output_dir="/tmp")
+        with patch.dict(os.environ, {"QUAY_AUTH_FILE": "/tmp/quay-auth.json"}, clear=True):
+            gpcli = rgp_cli.GenPayloadCli(output_dir="/tmp")
 
-        exec_mock.return_value = None  # do not actually execute command
-        buffer = io.StringIO()
-        open_mock.return_value.__aenter__.return_value.write = AsyncMock(side_effect=lambda s: buffer.write(s))
-        fmlsha_mock.return_value = "sha256:abcdef"
+            exec_mock.return_value = None  # do not actually execute command
+            buffer = io.StringIO()
+            open_mock.return_value.__aenter__.return_value.write = AsyncMock(side_effect=lambda s: buffer.write(s))
+            fmlsha_mock.return_value = "sha256:abcdef"
 
-        pullspec = await gpcli.create_multi_release_manifest_list(
-            arch_release_dests=dict(x86_64="pullspec:x86"),
-            imagestream_name="isname",
-            multi_release_dest="quay.io/org/repo:spam",
-        )
+            pullspec = await gpcli.create_multi_release_manifest_list(
+                arch_release_dests=dict(x86_64="pullspec:x86"),
+                imagestream_name="isname",
+                multi_release_dest="quay.io/org/repo:spam",
+            )
         self.assertEqual(pullspec, "quay.io/org/repo@sha256:abcdef")
-        self.assertEqual(exec_mock.call_args[0][0], "manifest-tool  push from-spec /tmp/isname.manifest-list.yaml")
+        self.assertEqual(
+            exec_mock.call_args[0][0],
+            [
+                "manifest-tool",
+                "--docker-cfg=/tmp/quay-auth.json",
+                "push",
+                "from-spec",
+                "/tmp/isname.manifest-list.yaml",
+            ],
+        )
+        fmlsha_mock.assert_awaited_once()
+        self.assertEqual(fmlsha_mock.await_args.kwargs["registry_config"], "/tmp/quay-auth.json")
         self.assertEqual(
             buffer.getvalue().strip(),
             """

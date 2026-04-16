@@ -1,13 +1,17 @@
 import asyncio
+import base64
 import datetime
 import hashlib
+import json
 import logging
 import os
 import random
 import re
+import shutil
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Sequence, Union, cast
 from urllib.parse import parse_qs, urlparse
@@ -16,17 +20,27 @@ import jinja2
 from artcommonlib import exectools
 from artcommonlib import util as art_util
 from artcommonlib.constants import KONFLUX_DEFAULT_NAMESPACE
+from artcommonlib.github_auth import get_github_app_token_for_org
 from async_lru import alru_cache
 from doozerlib import constants
 from doozerlib.backend.konflux_watcher import KonfluxWatcher
 from doozerlib.backend.pipelinerun_utils import PipelineRunInfo
 from kubernetes import config, watch
-from kubernetes.client import ApiClient, Configuration, CoreV1Api
+from kubernetes.client import ApiClient, ApiException, Configuration, CoreV1Api, V1ObjectMeta, V1Secret
 from kubernetes.dynamic import DynamicClient, exceptions, resource
 from ruamel.yaml import YAML
 
 yaml = YAML(typ="safe")
 LOGGER = logging.getLogger(__name__)
+
+# Prefix and label for transient git-auth secrets created per doozer invocation.
+# Each invocation mints a GitHub App installation token and stores it in a
+# uniquely-named Secret so concurrent builds never contend on the same object.
+_GIT_AUTH_SECRET_PREFIX = "art-transient-pipeline-auth-"
+_GIT_AUTH_SECRET_LABEL_KEY = "art.openshift.io/git-auth"
+_GIT_AUTH_SECRET_LABEL_VALUE = "true"
+_GIT_AUTH_GENERATED_BY_LABEL_KEY = "art.openshift.io/generated-by"
+_GIT_AUTH_GENERATED_BY_LABEL_VALUE = "art-automation"
 
 # Label key used to filter PipelineRuns for this process
 _COMMON_RUNTIME_LABEL_KEY = "doozer-watch-id"
@@ -50,6 +64,15 @@ def get_common_runtime_watcher_labels() -> Dict[str, str]:
             # Use nanoseconds since epoch for uniqueness
             _COMMON_RUNTIME_LABEL_VALUE = str(time.time_ns())
         return {_COMMON_RUNTIME_LABEL_KEY: _COMMON_RUNTIME_LABEL_VALUE}
+
+
+@dataclass
+class ECVerificationResult:
+    """Result of an enterprise-contract verification run."""
+
+    ec_status: object  # KonfluxECStatus (imported lazily to avoid circular imports)
+    ec_pipeline_url: str
+    ec_failed: bool
 
 
 class GitHubApiUrlInfo(NamedTuple):
@@ -139,30 +162,45 @@ def _clone_or_update_template_repo(git_url: str, ref: str) -> Path:
                     LOGGER.warning(f"Failed to update cached repo, will re-clone: {e}")
                     # Fall through to clone
 
-        # Clone the repository
+        # Clone the repository with retries
         cache_dir = _get_template_cache_dir()
         repo_path = cache_dir / cache_key
 
-        if repo_path.exists():
-            # Remove stale clone
-            import shutil
+        # Retry clone operation with deletion between attempts to handle race conditions
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Remove any existing directory to avoid "already exists" errors
+                if repo_path.exists():
+                    shutil.rmtree(repo_path, ignore_errors=True)
 
-            shutil.rmtree(repo_path, ignore_errors=True)
-
-        LOGGER.info(f"Cloning template repo {git_url} to {repo_path}")
-        exectools.cmd_assert(f'git clone --no-single-branch {git_url} {repo_path}', retries=3)
-        exectools.cmd_assert(f'git -C {repo_path} checkout {ref}', retries=3)
+                LOGGER.info(f"Cloning template repo {git_url} to {repo_path} (attempt {attempt + 1}/{max_retries})")
+                exectools.cmd_assert(f'git clone --no-single-branch {git_url} {repo_path}')
+                exectools.cmd_assert(f'git -C {repo_path} checkout {ref}')
+                break  # Success, exit retry loop
+            except ChildProcessError as e:
+                if attempt < max_retries - 1:
+                    # Not the last attempt, wait and retry
+                    LOGGER.warning(f"Clone attempt {attempt + 1} failed: {e}. Retrying in 5 seconds...")
+                    time.sleep(5)
+                    continue
+                else:
+                    # Last attempt failed, raise the error
+                    LOGGER.error(f"All {max_retries} clone attempts failed for {git_url}")
+                    raise
 
         _TEMPLATE_REPO_CACHE[cache_key] = repo_path
         return repo_path
 
 
 API_VERSION = "appstudio.redhat.com/v1alpha1"
+API_VERSION_V1BETA2 = "appstudio.redhat.com/v1beta2"
 KIND_SNAPSHOT = "Snapshot"
 KIND_COMPONENT = "Component"
 KIND_APPLICATION = "Application"
 KIND_RELEASE = "Release"
 KIND_RELEASE_PLAN = "ReleasePlan"
+KIND_INTEGRATION_TEST_SCENARIO = "IntegrationTestScenario"
 
 DEFAULT_WAIT_HOURS_RELEASE = 5
 
@@ -195,6 +233,8 @@ class KonfluxClient:
         # This is a workaround to set a timeout for the requests.
         # https://github.com/kubernetes-client/python/blob/master/examples/watch/timeout-settings.md
         self.request_timeout = 60 * 5  # 5 minutes
+        # Cached per-invocation git-auth secret name (created once, reused for all PLRs)
+        self._git_auth_secret_name: Optional[str] = None
 
     def verify_connection(self):
         try:
@@ -203,6 +243,164 @@ class KonfluxClient:
         except Exception as e:
             self._logger.error(f"Failed to authenticate to the Kubernetes cluster: {e}")
             raise
+
+    async def ensure_git_auth_secret(self, namespace: Optional[str] = None, org: str = "openshift-priv") -> str:
+        """Mint a GitHub App installation token and store it in a per-invocation
+        Kubernetes Secret for use as a git-clone basic-auth credential.
+
+        The secret is created once per KonfluxClient instance and reused for all
+        PipelineRuns in the same doozer invocation — no contention between
+        concurrent builds.
+
+        Falls back to the static "pipelines-as-code-secret" when GitHub App
+        credentials are not configured (GITHUB_APP_ID unset).
+
+        :param namespace: Target namespace. Defaults to self.default_namespace.
+        :param org: GitHub org whose installation token to mint.
+                    Defaults to "openshift-priv" (where Konflux build sources live).
+        :return: The secret name to wire into PipelineRun workspaces.
+        """
+        if self._git_auth_secret_name:
+            return self._git_auth_secret_name
+
+        if not os.environ.get("GITHUB_APP_ID"):
+            self._logger.info("GITHUB_APP_ID not set; falling back to static pipelines-as-code-secret")
+            return "pipelines-as-code-secret"
+
+        namespace = namespace or self.default_namespace
+
+        # Mint a short-lived installation token (valid ~1 hour, but only the
+        # git-clone + prefetch tasks need it — those run in the first few minutes).
+        token = await exectools.to_thread(get_github_app_token_for_org, org)
+
+        # Nanosecond epoch avoids name collisions when multiple doozer
+        # invocations start within the same second.  A human-readable
+        # timestamp would need sanitising for k8s naming rules and still
+        # risk collisions at second granularity, so raw nanoseconds are
+        # the safest choice.  Use the helper below to decode:
+        #   python3 -c "import datetime as d; print(d.datetime.fromtimestamp(<ns>/1e9, d.timezone.utc))"
+        epoch_ns = time.time_ns()
+        secret_name = f"{_GIT_AUTH_SECRET_PREFIX}{epoch_ns}"
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        secret = V1Secret(
+            api_version="v1",
+            kind="Secret",
+            type="kubernetes.io/basic-auth",
+            metadata=V1ObjectMeta(
+                name=secret_name,
+                namespace=namespace,
+                labels={
+                    _GIT_AUTH_SECRET_LABEL_KEY: _GIT_AUTH_SECRET_LABEL_VALUE,
+                    _GIT_AUTH_GENERATED_BY_LABEL_KEY: _GIT_AUTH_GENERATED_BY_LABEL_VALUE,
+                },
+                annotations={
+                    "art.openshift.io/created-at": now,
+                    "art-jenkins-job-url": os.getenv("BUILD_URL", "n/a"),
+                },
+            ),
+            # basic-auth secrets expect "username" and "password" keys
+            data={
+                "username": base64.b64encode(b"x-access-token").decode(),
+                "password": base64.b64encode(token.encode()).decode(),
+            },
+        )
+
+        if self.dry_run:
+            self._logger.warning(f"[DRY RUN] Would have created git-auth Secret {namespace}/{secret_name}")
+        else:
+            await exectools.to_thread(
+                self.corev1_client.create_namespaced_secret,
+                namespace=namespace,
+                body=secret,
+                _request_timeout=self.request_timeout,
+            )
+            self._logger.info(f"Created git-auth Secret {namespace}/{secret_name}")
+
+        self._git_auth_secret_name = secret_name
+        return secret_name
+
+    async def delete_git_auth_secret(self, namespace: Optional[str] = None) -> None:
+        """Delete the transient git-auth secret created by this invocation.
+
+        No-op when no transient secret was created (e.g. fallback to the static
+        pipelines-as-code-secret).  A 404 from the API is silently ignored so
+        that concurrent or repeated calls are safe.
+
+        :param namespace: Target namespace. Defaults to self.default_namespace.
+        """
+        secret_name = self._git_auth_secret_name
+        if not secret_name or not secret_name.startswith(_GIT_AUTH_SECRET_PREFIX):
+            return
+
+        namespace = namespace or self.default_namespace
+
+        if self.dry_run:
+            self._logger.warning(f"[DRY RUN] Would have deleted git-auth Secret {namespace}/{secret_name}")
+        else:
+            try:
+                await exectools.to_thread(
+                    self.corev1_client.delete_namespaced_secret,
+                    name=secret_name,
+                    namespace=namespace,
+                    _request_timeout=self.request_timeout,
+                )
+                self._logger.info(f"Deleted git-auth Secret {namespace}/{secret_name}")
+            except ApiException as e:
+                if e.status == 404:
+                    self._logger.debug(f"Secret {secret_name} already deleted by another process")
+                else:
+                    self._logger.warning(f"Failed to delete git-auth Secret {secret_name}: {e}")
+
+        self._git_auth_secret_name = None
+
+    async def cleanup_stale_git_auth_secrets(self, namespace: Optional[str] = None, max_age_hours: int = 24) -> None:
+        """Delete transient git-auth secrets older than *max_age_hours*.
+
+        Safe to call from concurrent doozer invocations: if two jobs race to
+        delete the same secret the loser simply gets a 404, which is ignored.
+
+        :param namespace: Target namespace. Defaults to self.default_namespace.
+        :param max_age_hours: Secrets older than this are deleted.
+        """
+        namespace = namespace or self.default_namespace
+        label_selector = (
+            f"{_GIT_AUTH_SECRET_LABEL_KEY}={_GIT_AUTH_SECRET_LABEL_VALUE},"
+            f"{_GIT_AUTH_GENERATED_BY_LABEL_KEY}={_GIT_AUTH_GENERATED_BY_LABEL_VALUE}"
+        )
+
+        secrets = await exectools.to_thread(
+            self.corev1_client.list_namespaced_secret,
+            namespace=namespace,
+            label_selector=label_selector,
+            _request_timeout=self.request_timeout,
+        )
+
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=max_age_hours)
+
+        for secret in secrets.items:
+            created = secret.metadata.creation_timestamp
+            if created and created >= cutoff:
+                continue
+
+            if self.dry_run:
+                self._logger.warning(f"[DRY RUN] Would have deleted stale git-auth Secret {secret.metadata.name}")
+                continue
+
+            try:
+                await exectools.to_thread(
+                    self.corev1_client.delete_namespaced_secret,
+                    name=secret.metadata.name,
+                    namespace=namespace,
+                    _request_timeout=self.request_timeout,
+                )
+                self._logger.info(f"Deleted stale git-auth Secret {secret.metadata.name}")
+            except ApiException as e:
+                # Another concurrent invocation may have already deleted it
+                if e.status == 404:
+                    self._logger.debug(f"Secret {secret.metadata.name} already deleted by another process")
+                else:
+                    self._logger.warning(f"Failed to delete stale Secret {secret.metadata.name}: {e}")
 
     @staticmethod
     def from_kubeconfig(
@@ -546,6 +744,299 @@ class KonfluxClient:
         return await self._create_or_replace(component)
 
     @staticmethod
+    def _new_integration_test_scenario(
+        name: str,
+        application_name: str,
+        application_uid: str,
+        policy_configuration: str,
+        ec_pipeline_url: str = constants.KONFLUX_EC_PIPELINE_GIT_URL,
+        ec_pipeline_revision: str = constants.KONFLUX_EC_PIPELINE_REVISION,
+        ec_pipeline_path: str = constants.KONFLUX_EC_PIPELINE_PATH,
+    ) -> dict:
+        """Create an IntegrationTestScenario manifest for enterprise-contract verification.
+
+        :param name: The name of the ITS resource.
+        :param application_name: The application name.
+        :param application_uid: The UID of the Application resource (for ownerReference).
+        :param policy_configuration: The EC policy configuration (e.g. rhtap-releng-tenant/registry-ocp-art-stage).
+        :param ec_pipeline_url: The git URL for the EC pipeline.
+        :param ec_pipeline_revision: The git revision for the EC pipeline.
+        :param ec_pipeline_path: The path to the EC pipeline in the git repo.
+        :return: The ITS manifest dict.
+        """
+        return {
+            "apiVersion": API_VERSION_V1BETA2,
+            "kind": KIND_INTEGRATION_TEST_SCENARIO,
+            "metadata": {
+                "name": name,
+                "labels": {
+                    "test.appstudio.openshift.io/optional": "true",
+                },
+                "annotations": {
+                    "test.appstudio.openshift.io/kind": "enterprise-contract",
+                },
+                "ownerReferences": [
+                    {
+                        "apiVersion": API_VERSION,
+                        "kind": KIND_APPLICATION,
+                        "name": application_name,
+                        "uid": application_uid,
+                    }
+                ],
+            },
+            "spec": {
+                "application": application_name,
+                "params": [
+                    {"name": "POLICY_CONFIGURATION", "value": policy_configuration},
+                    {"name": "SINGLE_COMPONENT", "value": "true"},
+                ],
+                "resolverRef": {
+                    "resolver": "git",
+                    "params": [
+                        {"name": "url", "value": ec_pipeline_url},
+                        {"name": "revision", "value": ec_pipeline_revision},
+                        {"name": "pathInRepo", "value": ec_pipeline_path},
+                    ],
+                    "resourceKind": "pipeline",
+                },
+            },
+        }
+
+    async def ensure_integration_test_scenario(
+        self,
+        name: str,
+        application_name: str,
+        policy_configuration: str,
+    ) -> resource.ResourceInstance:
+        """Ensure an IntegrationTestScenario exists for the given application.
+
+        Creates or patches the ITS resource idempotently. Safe for concurrent calls.
+
+        :param name: The name of the ITS resource.
+        :param application_name: The application name.
+        :param policy_configuration: The EC policy configuration.
+        :return: The ITS resource.
+        """
+        app = await self.get_application(application_name, strict=True)
+        application_uid = app.metadata.uid
+
+        its = self._new_integration_test_scenario(
+            name=name,
+            application_name=application_name,
+            application_uid=application_uid,
+            policy_configuration=policy_configuration,
+        )
+        return await self._create_or_patch(its)
+
+    @staticmethod
+    def _new_ec_pipelinerun(
+        generate_name: str,
+        namespace: str,
+        application_name: str,
+        component_name: str,
+        snapshot_json: str,
+        its_name: str,
+        policy_configuration: str,
+        watch_labels: dict,
+        ec_pipeline_url: str = constants.KONFLUX_EC_PIPELINE_GIT_URL,
+        ec_pipeline_revision: str = constants.KONFLUX_EC_PIPELINE_REVISION,
+        ec_pipeline_path: str = constants.KONFLUX_EC_PIPELINE_PATH,
+    ) -> dict:
+        """Create a PipelineRun manifest for enterprise-contract verification.
+
+        :param generate_name: The generateName prefix for the PipelineRun.
+        :param namespace: The namespace for the PipelineRun.
+        :param application_name: The application name.
+        :param component_name: The component name.
+        :param snapshot_json: JSON-encoded snapshot spec for the SNAPSHOT param.
+        :param its_name: The name of the IntegrationTestScenario.
+        :param policy_configuration: The EC policy configuration.
+        :param watch_labels: Labels for the KonfluxWatcher to track this PLR.
+        :param ec_pipeline_url: The git URL for the EC pipeline.
+        :param ec_pipeline_revision: The git revision for the EC pipeline.
+        :param ec_pipeline_path: The path to the EC pipeline in the git repo.
+        :return: The PipelineRun manifest dict.
+        """
+        labels = {
+            "appstudio.openshift.io/application": application_name,
+            "appstudio.openshift.io/component": component_name,
+            "test.appstudio.openshift.io/scenario": its_name,
+            "kueue.x-k8s.io/priority-class": "build-priority-2",
+        }
+        labels.update(watch_labels)
+
+        return {
+            "apiVersion": "tekton.dev/v1",
+            "kind": "PipelineRun",
+            "metadata": {
+                "generateName": generate_name,
+                "namespace": namespace,
+                "labels": labels,
+                "annotations": {
+                    "test.appstudio.openshift.io/kind": "enterprise-contract",
+                    "art-jenkins-job-url": os.getenv("BUILD_URL", "n/a"),
+                },
+            },
+            "spec": {
+                "pipelineRef": {
+                    "resolver": "git",
+                    "params": [
+                        {"name": "url", "value": ec_pipeline_url},
+                        {"name": "revision", "value": ec_pipeline_revision},
+                        {"name": "pathInRepo", "value": ec_pipeline_path},
+                    ],
+                },
+                "params": [
+                    {"name": "POLICY_CONFIGURATION", "value": policy_configuration},
+                    {"name": "SINGLE_COMPONENT", "value": "true"},
+                    {"name": "SNAPSHOT", "value": snapshot_json},
+                ],
+                "taskRunTemplate": {
+                    "serviceAccountName": f"build-pipeline-{component_name}",
+                },
+                "timeouts": {
+                    "pipeline": "1h",
+                },
+            },
+        }
+
+    async def start_ec_pipeline_run(
+        self,
+        namespace: str,
+        application_name: str,
+        component_name: str,
+        image_pullspec: str,
+        source_url: str,
+        commit_sha: str,
+        its_name: str,
+        policy_configuration: str,
+    ) -> PipelineRunInfo:
+        """Start an enterprise-contract verification PipelineRun.
+
+        :param namespace: The namespace for the PipelineRun.
+        :param application_name: The application name.
+        :param component_name: The component name.
+        :param image_pullspec: The built image pullspec (repo@digest).
+        :param source_url: The source git URL.
+        :param commit_sha: The source commit SHA.
+        :param its_name: The name of the IntegrationTestScenario.
+        :param policy_configuration: The EC policy configuration.
+        :return: The PipelineRunInfo for the created EC PipelineRun.
+        """
+        snapshot_spec = {
+            "application": application_name,
+            "components": [
+                {
+                    "name": component_name,
+                    "containerImage": image_pullspec,
+                    "source": {
+                        "git": {
+                            "url": source_url,
+                            "revision": commit_sha,
+                        }
+                    },
+                }
+            ],
+        }
+        snapshot_json = json.dumps(snapshot_spec)
+
+        watch_labels = get_common_runtime_watcher_labels()
+        generate_name = f"{application_name}-ec-{component_name}-"
+        # K8s names must be <= 253 chars; generateName adds 5 random chars
+        if len(generate_name) > 248:
+            generate_name = generate_name[:248]
+
+        manifest = self._new_ec_pipelinerun(
+            generate_name=generate_name,
+            namespace=namespace,
+            application_name=application_name,
+            component_name=component_name,
+            snapshot_json=snapshot_json,
+            its_name=its_name,
+            policy_configuration=policy_configuration,
+            watch_labels=watch_labels,
+        )
+
+        if self.dry_run:
+            fake_plr = resource.ResourceInstance(self.dyn_client, manifest)
+            fake_plr.metadata.name = f"{component_name}-ec-dry-run"
+            self._logger.warning(f"[DRY RUN] Would have created EC PipelineRun: {fake_plr.metadata.name}")
+            return PipelineRunInfo(fake_plr, {})
+
+        plr = await self._create(manifest, async_req=True)
+        plr_info = PipelineRunInfo(plr, {})
+        self._logger.info(f"Created EC PipelineRun: {self.resource_url(plr.to_dict())}")
+        return plr_info
+
+    async def verify_enterprise_contract(
+        self,
+        namespace: str,
+        application_name: str,
+        component_name: str,
+        image_pullspec: str,
+        source_url: str,
+        commit_sha: str,
+        ec_policy: str,
+        logger: logging.Logger,
+    ) -> ECVerificationResult:
+        """Run enterprise-contract verification for a built image.
+
+        Ensures an IntegrationTestScenario exists, starts an EC PipelineRun,
+        waits for completion, and returns the result. This is the shared entry
+        point used by image, FBC, and bundle builders.
+        """
+        from artcommonlib.konflux.konflux_build_record import KonfluxBuildOutcome, KonfluxECStatus
+
+        ec_status = KonfluxECStatus.NOT_APPLICABLE
+        ec_pipeline_url = ''
+        ec_failed = False
+
+        try:
+            policy_suffix = ec_policy.split('/')[-1]
+            its_name = f"{application_name}-ec-{policy_suffix}"
+
+            logger.info("Ensuring IntegrationTestScenario %s exists...", its_name)
+            await self.ensure_integration_test_scenario(
+                name=its_name,
+                application_name=application_name,
+                policy_configuration=ec_policy,
+            )
+
+            logger.info("Starting EC verification PipelineRun...")
+            ec_plr_info = await self.start_ec_pipeline_run(
+                namespace=namespace,
+                application_name=application_name,
+                component_name=component_name,
+                image_pullspec=image_pullspec,
+                source_url=source_url,
+                commit_sha=commit_sha,
+                its_name=its_name,
+                policy_configuration=ec_policy,
+            )
+            ec_plr_name = ec_plr_info.name
+
+            logger.info("Waiting for EC PipelineRun %s to complete...", ec_plr_name)
+            ec_plr_info = await self.wait_for_pipelinerun(ec_plr_name, namespace=namespace)
+
+            ec_pipeline_url = self.resource_url(ec_plr_info.to_dict())
+            ec_condition = ec_plr_info.find_condition('Succeeded')
+            ec_outcome = KonfluxBuildOutcome.extract_from_pipelinerun_succeeded_condition(ec_condition)
+            if ec_outcome is not KonfluxBuildOutcome.SUCCESS:
+                logger.error("EC verification failed. PLR: %s", ec_pipeline_url)
+                ec_status = KonfluxECStatus.FAILED
+                ec_failed = True
+            else:
+                logger.info("EC verification passed. PLR: %s", ec_pipeline_url)
+                ec_status = KonfluxECStatus.PASSED
+
+        except Exception:
+            logger.exception("EC verification error")
+            ec_status = KonfluxECStatus.FAILED
+            ec_failed = True
+
+        return ECVerificationResult(ec_status=ec_status, ec_pipeline_url=ec_pipeline_url, ec_failed=ec_failed)
+
+    @staticmethod
     @alru_cache
     async def _get_pipelinerun_template(template_url: str):
         """Get a PipelineRun template by cloning the repository locally.
@@ -695,8 +1186,8 @@ class KonfluxClient:
 
         obj["spec"]["taskRunTemplate"]["serviceAccountName"] = service_account or f"build-pipeline-{component_name}"
 
-        # Check if RPM lockfile prefetch is being used
-        rpm_lockfile_prefetch_enabled = prefetch and any(item.get("type") == "rpm" for item in prefetch)
+        # Check if verbose prefetch is being used (RPM, generic, or yarn types)
+        verbose_prefetch_enabled = prefetch and any(item.get("type") in ("rpm", "generic", "yarn") for item in prefetch)
 
         # Task specific parameters to override in the template
         has_build_images_task = False
@@ -709,7 +1200,7 @@ class KonfluxClient:
                     _modify_param(task["params"], "SBOM_TYPE", "spdx")
                 case "prefetch-dependencies":
                     _modify_param(task["params"], "sbom-type", "spdx")
-                    if rpm_lockfile_prefetch_enabled:
+                    if verbose_prefetch_enabled:
                         _modify_param(task["params"], "dev-package-managers", "true")
                         _modify_param(task["params"], "log-level", "debug")
                 case "apply-tags":

@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import io
 import logging
 import os
@@ -11,6 +10,7 @@ import koji
 from artcommonlib import exectools
 from artcommonlib.brew import BuildStates
 from artcommonlib.constants import BREW_HUB, GOLANG_BUILDER_IMAGE_NAME, PRODUCT_NAMESPACE_MAP
+from artcommonlib.github_auth import get_github_client_for_org
 from artcommonlib.konflux.konflux_build_record import ArtifactType, Engine, KonfluxBuildOutcome, KonfluxBuildRecord
 from artcommonlib.konflux.konflux_db import KonfluxDb
 from artcommonlib.release_util import split_el_suffix_in_release
@@ -18,8 +18,6 @@ from artcommonlib.rpm_utils import parse_nvr
 from artcommonlib.util import new_roundtrip_yaml_handler
 from elliottlib import util as elliottutil
 from elliottlib.constants import GOLANG_BUILDER_CVE_COMPONENT
-from ghapi.all import GhApi
-from github import Github
 
 from pyartcd import constants, jenkins
 from pyartcd.cli import cli, click_coroutine, pass_runtime
@@ -196,9 +194,7 @@ class UpdateGolangPipeline:
             kubeconfig = os.environ.get('KONFLUX_SA_KUBECONFIG')
         self.kubeconfig = kubeconfig
 
-        self.github_token = os.environ.get('GITHUB_TOKEN')
-        if not self.github_token:
-            raise ValueError("GITHUB_TOKEN environment variable is required to fetch build data repo contents")
+        # GitHub auth is handled by get_github_client_for_org() with App auth / PAT fallback
 
         # Initialize KonfluxDb for Konflux build system
         if build_system in ('konflux', 'both'):
@@ -359,6 +355,11 @@ class UpdateGolangPipeline:
         # Tag builds into override tag
         await self.tag_build(el_v, nvr)
         # Wait for repo to be available (5 hours max)
+
+        if self.dry_run:
+            _LOGGER.info(f"[DRY RUN] Would have waited for {nvr} to be available in build tags")
+            return True
+
         for _ in range(30):
             await asyncio.sleep(600)  # 10 minutes
             if await is_latest_and_available(self.ocp_version, el_v, nvr, self.koji_session):
@@ -456,18 +457,27 @@ class UpdateGolangPipeline:
             for el_v, build_record in zip(el_nvr_map, build_records)
             if build_record
         }
-        go_nvr_map = elliottutil.get_golang_container_nvrs_for_konflux_record(found_records.values(), _LOGGER)
-        for builder_go_vr, nvrs in go_nvr_map.items():
-            for el_v, go_nvr in el_nvr_map.items():
-                # Strip RHEL minor version suffix (e.g. el9_5 -> el9) from both sides,
-                # since installed RPMs may have a more specific dist tag than the input NVR
-                normalized_builder = re.sub(r'\.el(\d+)_\d+$', r'.el\1', builder_go_vr)
-                normalized_input = re.sub(r'\.el(\d+)_\d+$', r'.el\1', go_nvr)
-                if normalized_builder in normalized_input:
-                    for nvr in nvrs:
-                        nvr_str = f"{nvr[0]}-{nvr[1]}-{nvr[2]}"
-                        _LOGGER.info(f"Found existing builder image in Konflux: {nvr_str} built with {go_nvr}")
-                        builder_nvrs[el_v] = nvr_str
+
+        # The found builder records until this point, their NVRs contain the go version substring that we are looking for
+        # Sometimes due to misconfiguration, installed golang rpm may be different/incorrect
+        # So ensure that the installed rpm is exactly the one we want
+        for el_v, build_record in found_records.items():
+            go_nvr_map = elliottutil.get_golang_container_nvrs_for_konflux_record(
+                [build_record],
+                _LOGGER,
+                exact=True,
+            )
+            actual_go_nvr, _ = next(iter(go_nvr_map.items()))
+            expected_go_nvr = el_nvr_map[el_v]
+            if actual_go_nvr != expected_go_nvr:
+                _LOGGER.warning(
+                    f"Installed golang rpm in {build_record.nvr} is different from the expected one: {actual_go_nvr} != {expected_go_nvr}"
+                )
+            else:
+                _LOGGER.info(
+                    f"Found existing builder image in Konflux: {build_record.nvr} built with {expected_go_nvr}"
+                )
+                builder_nvrs[el_v] = build_record.nvr
         return builder_nvrs
 
     def _get_builder_pullspec(self, parsed_nvr, build_system: str):
@@ -486,9 +496,8 @@ class UpdateGolangPipeline:
         3. If it'a major version bump, also need to update key in streams.yml and vars in group.yml
         4. Create pr to update changes
         """
-        github_client = Github(os.environ.get("GITHUB_TOKEN"))
         branch = f"openshift-{self.ocp_version}"
-        upstream_repo = github_client.get_repo("openshift-eng/ocp-build-data")
+        upstream_repo = get_github_client_for_org("openshift-eng").get_repo("openshift-eng/ocp-build-data")
         streams_content = yaml.load(upstream_repo.get_contents("streams.yml", ref=branch).decoded_content)
         group_content = yaml.load(upstream_repo.get_contents("group.yml", ref=branch).decoded_content)
 
@@ -603,7 +612,7 @@ class UpdateGolangPipeline:
                     f"Golang builder images:\n{builder_details}"
                 )
                 return
-            fork_repo = github_client.get_repo("openshift-bot/ocp-build-data")
+            fork_repo = get_github_client_for_org("openshift-bot").get_repo("openshift-bot/ocp-build-data")
             branch_name = f"update-golang-{self.ocp_version}-{go_version}"
             title = f"{self.art_jira} - Bump {self.ocp_version} golang builders to {go_version}"
             update_message = f"Bump {self.ocp_version} golang builders to {go_version}"
@@ -758,6 +767,7 @@ class UpdateGolangPipeline:
                 branch,
                 "beta:images:konflux:build",
                 f"--konflux-namespace={konflux_namespace}",
+                "--skip-ec-verify",
             ]
         )
         if self.kubeconfig:
@@ -778,21 +788,19 @@ class UpdateGolangPipeline:
         return f'rhel-{el_v}-golang-{go_v}'
 
     def verify_golang_builder_repo(self, el_v, go_version):
-        # read group.yml from the golang branch using ghapi
-        owner, repo = 'openshift-eng', 'ocp-build-data'
         branch = self.get_golang_branch(el_v, go_version)
         filename = 'group.yml'
 
-        api = GhApi(owner=owner, repo=repo, token=self.github_token)
-        blob = api.repos.get_content(filename, ref=branch)
-        group_config = yaml.load(base64.b64decode(blob['content']))
+        repo = get_github_client_for_org("openshift-eng").get_repo("openshift-eng/ocp-build-data")
+        content = repo.get_contents(filename, ref=branch)
+        group_config = yaml.load(content.decoded_content)
         content_repo_url_suffix = self.get_content_repo_url_suffix(el_v)
 
         golang_repo = f'rhel-{el_v}-golang-rpms'
         if golang_repo not in group_config['repos']:
             raise ValueError(
                 f"Did not find {golang_repo} defined at "
-                f"https://github.com/{owner}/{repo}/blob/{branch}/{filename}. If it's with a different "
+                f"https://github.com/openshift-eng/ocp-build-data/blob/{branch}/{filename}. If it's with a different "
                 "name please correct it."
             )
 

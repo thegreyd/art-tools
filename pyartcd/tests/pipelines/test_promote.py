@@ -1984,9 +1984,9 @@ class TestPromotePipeline(IsolatedAsyncioTestCase):
         )
 
     @patch("pyartcd.jira_client.JIRAClient.from_url", return_value=None)
-    @patch("pyartcd.pipelines.promote.Github")
+    @patch("pyartcd.pipelines.promote.get_github_client_for_org")
     @patch.dict(os.environ, {"GITHUB_TOKEN": "fake-token"})
-    async def test_update_qe_repo_releases_is_none(self, mock_github_class: Mock, _):
+    async def test_update_qe_repo_releases_is_none(self, mock_get_github_client: Mock, _):
         """
         Test _update_qe_repo handles TypeError when YAML contains 'releases:' with no value.
         When yaml.load returns {'releases': None}, attempting file_content['releases'][release_name]
@@ -1999,13 +1999,21 @@ class TestPromotePipeline(IsolatedAsyncioTestCase):
 
         pipeline = PromotePipeline(runtime, group="openshift-4.21", assembly="4.21.0", signing_env="prod")
 
-        mock_github = MagicMock()
-        mock_github_class.return_value = mock_github
         mock_upstream_repo = MagicMock()
         mock_fork_repo = MagicMock()
-        mock_github.get_repo.side_effect = lambda repo: (
-            mock_upstream_repo if repo == "openshift/release-tests" else mock_fork_repo
-        )
+        mock_openshift_client = MagicMock()
+        mock_openshift_client.get_repo.return_value = mock_upstream_repo
+        mock_openshift_bot_client = MagicMock()
+        mock_openshift_bot_client.get_repo.return_value = mock_fork_repo
+
+        def get_client_side_effect(org):
+            if org == "openshift":
+                return mock_openshift_client
+            if org == "openshift-bot":
+                return mock_openshift_bot_client
+            return MagicMock()
+
+        mock_get_github_client.side_effect = get_client_side_effect
 
         mock_fork_repo.get_branches.return_value = []
         mock_upstream_branch = MagicMock()
@@ -2048,3 +2056,51 @@ class TestPromotePipeline(IsolatedAsyncioTestCase):
                 }
             },
         )
+
+    @patch("pyartcd.jira_client.JIRAClient.from_url", return_value=None)
+    @patch("pyartcd.pipelines.promote.exectools.cmd_assert_async")
+    @patch("pyartcd.pipelines.promote.manifest_tool")
+    async def test_push_manifest_list_uses_quay_auth_file(
+        self, manifest_tool: AsyncMock, cmd_assert_async: AsyncMock, _
+    ):
+        runtime = MagicMock(
+            config={
+                "build_config": {
+                    "ocp_build_data_url": "https://example.com/ocp-build-data.git",
+                },
+                "jira": {
+                    "url": JIRA_SERVER_URL,
+                },
+            },
+            dry_run=False,
+            logger=MagicMock(),
+            new_slack_client=MagicMock(return_value=AsyncMock()),
+            new_mail_client=MagicMock(),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime.working_dir = Path(temp_dir)
+            pipeline = PromotePipeline(runtime, group="openshift-4.10", assembly="4.10.99", signing_env="prod")
+            with patch.dict(os.environ, {"QUAY_AUTH_FILE": "/tmp/quay-auth.json", "XDG_RUNTIME_DIR": "/run/user/984"}):
+                await pipeline.push_manifest_list("4.10.99", {"schemaVersion": 2})
+
+            manifest_tool.assert_awaited_once_with(
+                ["push", "from-spec", "--", str(Path(temp_dir) / "4.10.99.manifest-list.yaml")],
+                False,
+                auth_file="/tmp/quay-auth.json",
+            )
+            cmd_assert_async.assert_awaited_once()
+            self.assertEqual(
+                cmd_assert_async.await_args.kwargs["env"]["QUAY_AUTH_FILE"],
+                "/tmp/quay-auth.json",
+            )
+            self.assertEqual(
+                cmd_assert_async.await_args.args[0],
+                [
+                    "manifest-tool",
+                    "--docker-cfg=/tmp/quay-auth.json",
+                    "push",
+                    "from-spec",
+                    "--",
+                    str(Path(temp_dir) / "4.10.99.manifest-list.yaml"),
+                ],
+            )

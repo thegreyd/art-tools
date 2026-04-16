@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 import sys
 from datetime import datetime
@@ -167,6 +168,7 @@ async def gen_assembly_from_releases(
         suggestions_url=suggestions_url,
         gen_microshift=gen_microshift,
         release_date=date,
+        registry_config=os.getenv("QUAY_AUTH_FILE"),
     ).run()
 
     # ruamel.yaml configuration
@@ -205,8 +207,10 @@ class GenAssemblyCli:
         suggestions_url: Optional[str] = None,
         gen_microshift: bool = False,
         release_date: Optional[str] = None,
+        registry_config: str = None,
     ):
         self.runtime = runtime
+        self.registry_config = registry_config
         # The name of the assembly we are going to output
         self.gen_assembly_name = gen_assembly_name
         self.nightlies = nightlies
@@ -356,7 +360,9 @@ class GenAssemblyCli:
             payload_tag_name = component_tag.name  # e.g. "aws-ebs-csi-driver"
             payload_tag_pullspec = component_tag['from'].name  # quay pullspec
             image_info = await util.oc_image_info_for_arch_async(
-                payload_tag_pullspec, go_arch_for_brew_arch(brew_cpu_arch)
+                payload_tag_pullspec,
+                go_arch_for_brew_arch(brew_cpu_arch),
+                registry_config=self.registry_config,
             )
             if payload_tag_name in rhcos_tag_names:
                 self.runtime.logger.info(f'Record rhcos tag name {payload_tag_name}')
@@ -370,7 +376,9 @@ class GenAssemblyCli:
                 continue
 
             # Use shared utility to extract NVR and get build inspector
-            name, version, release_ver = await release_inspector.extract_nvr_from_pullspec(payload_tag_pullspec)
+            name, version, release_ver = await release_inspector.extract_nvr_from_pullspec(
+                payload_tag_pullspec, registry_config=self.registry_config
+            )
             package_name = name
             build_nvr = f"{name}-{version}-{release_ver}"
 
@@ -591,15 +599,25 @@ class GenAssemblyCli:
                         f"Did not find RHCOS {self.primary_rhcos_tag} image for active group architecture: {arch}"
                     )
                 # get rhcos pullspecs for this arch from rhcos version value if not full arch nightly provided
-                for tag in rhcos.get_container_configs(self.runtime):
-                    if self.rhcos_by_tag[tag.name].get(arch):
-                        continue
-                    if self.runtime.group_config.rhcos.get("layered_rhcos", False):
+                tags_to_resolve = [
+                    tag
+                    for tag in rhcos.get_container_configs(self.runtime)
+                    if not self.rhcos_by_tag[tag.name].get(arch)
+                ]
+                if not tags_to_resolve:
+                    continue
+
+                if self.runtime.group_config.rhcos.get("layered_rhcos", False):
+                    for tag in tags_to_resolve:
                         if not self.rhcos_by_tag[tag.name].get("x86_64"):
                             self._exit_with_error(
                                 f"Did not find RHCOS {tag.name} image for architecture: x86_64 in any nightly"
                             )
-                        amd64_rhcos_info = util.oc_image_info_for_arch(self.rhcos_by_tag[tag.name]["x86_64"], "amd64")
+                        amd64_rhcos_info = util.oc_image_info_for_arch(
+                            self.rhcos_by_tag[tag.name]["x86_64"],
+                            "amd64",
+                            registry_config=self.registry_config,
+                        )
                         # NOTE: RHCOS images are currently always in ocp-v4.0-art-dev, even for OCP 5.x.
                         # When RHCOS 5.x images exist in their own repository, this should be updated to
                         # use the actual OCP major version: get_art_prod_image_repo_for_version(major, "dev")
@@ -607,25 +625,42 @@ class GenAssemblyCli:
                         rhcos_info = util.oc_image_info_for_arch(
                             f"{art_repo}:{amd64_rhcos_info['config']['config']['Labels']['coreos.build.manifest-list-tag']}",
                             go_arch_for_brew_arch(arch),
+                            registry_config=self.registry_config,
                         )
                         self.rhcos_by_tag[tag.name][arch] = f"{art_repo}@{rhcos_info['digest']}"
-                    else:
-                        url_key = (
-                            f"{major_minor}-{rhcos_el_major}.{rhcos_el_minor}" if rhcos_el_major > 8 else major_minor
+                        self.logger.info(f'Find RHCOS image {tag.name} for {arch}: {self.rhcos_by_tag[tag.name][arch]}')
+                else:
+                    url_key = f"{major_minor}-{rhcos_el_major}.{rhcos_el_minor}" if rhcos_el_major > 8 else major_minor
+                    rhcos_build_url = (
+                        f"{RHCOS_RELEASES_STREAM_URL}/{url_key}/builds/{self.rhcos_version}/{arch}/meta.json"
+                    )
+                    self.logger.info("Fetching RHCOS build metadata: %s", rhcos_build_url)
+                    session = requests.Session()
+                    retry_strategy = Retry(total=3, backoff_factor=2, status_forcelist=[429, 500, 502, 503, 504])
+                    session.mount('https://', HTTPAdapter(max_retries=retry_strategy))
+                    try:
+                        response = session.get(rhcos_build_url, timeout=60)
+                        response.raise_for_status()
+                        rhcos_meta_json = response.json()
+                    except requests.exceptions.RetryError as e:
+                        self._exit_with_error(
+                            f"RHCOS server is experiencing issues (retried 3 times). "
+                            f"URL: {rhcos_build_url}\n"
+                            f"Error: {e}\n"
+                            f"This is likely a transient server issue. Please retry the build."
                         )
-                        rhcos_build_url = (
-                            f"{RHCOS_RELEASES_STREAM_URL}/{url_key}/builds/{self.rhcos_version}/{arch}/meta.json"
-                        )
-                        session = requests.Session()
-                        session.mount('https://', HTTPAdapter(max_retries=Retry(total=3)))
-                        rhcos_meta_json = session.get(rhcos_build_url).json()
+                    except requests.exceptions.HTTPError as e:
+                        self._exit_with_error(f"Failed to fetch RHCOS metadata from {rhcos_build_url}: {e}")
+                    except requests.exceptions.JSONDecodeError as e:
+                        self._exit_with_error(f"Failed to parse RHCOS metadata JSON from {rhcos_build_url}: {e}")
+                    for tag in tags_to_resolve:
                         if tag.build_metadata_key not in rhcos_meta_json:
                             self._exit_with_error(
                                 f'Did not find RHCOS "{tag.name}" image for active group architecture: {arch}'
                             )
                         rhcos_image = rhcos_meta_json[tag.build_metadata_key]
                         self.rhcos_by_tag[tag.name][arch] = f"{rhcos_image['image']}@{rhcos_image['digest']}"
-                    self.logger.info(f'Find RHCOS image {tag.name} for {arch}: {self.rhcos_by_tag[tag.name][arch]}')
+                        self.logger.info(f'Find RHCOS image {tag.name} for {arch}: {self.rhcos_by_tag[tag.name][arch]}')
 
     async def _select_rpms(self):
         """

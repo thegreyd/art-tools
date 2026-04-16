@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import sys
 import traceback
@@ -60,6 +61,7 @@ from doozerlib.util import (
 )
 
 TRACER = trace.get_tracer(__name__)
+logger = logging.getLogger(__name__)
 
 
 async def check_multi_nightly_exists_for_model(model_nightly_name: str) -> bool:
@@ -548,7 +550,21 @@ class GenPayloadCli:
         self.payload_entries_for_arch, self.private_payload_entries_for_arch = await self.generate_payload_entries(
             assembly_inspector
         )
-        assembly_report: Dict = await self.generate_assembly_report(assembly_inspector)
+
+        if self.multi_model:
+            # The model nightly already passed consistency checks in regular build-sync;
+            # re-running them here is expensive and can flake without adding value.
+            self.payload_permitted = True
+            assembly_report: Dict = dict(
+                non_release_images=[m.distgit_key for m in rt.get_non_release_image_metas()],
+                release_images=[m.distgit_key for m in rt.get_for_release_image_metas()],
+                missing_image_builds=[],
+                viable=True,
+                assembly_issues={},
+            )
+            self.logger.info("Multi-model mode: skipping assembly consistency checks")
+        else:
+            assembly_report: Dict = await self.generate_assembly_report(assembly_inspector)
 
         self.logger.info('\n%s', yaml.dump(assembly_report, default_flow_style=False, indent=2))
         with self.output_path.joinpath("assembly-report.yaml").open(mode="w") as report_file:
@@ -612,6 +628,7 @@ class GenPayloadCli:
             suggestions_url=None,
             gen_microshift=False,
             release_date=dummy_release_date,  # Prevent release schedule lookup
+            registry_config=os.getenv("QUAY_AUTH_FILE"),
         )
 
         # Run gen-assembly logic to create the assembly definition
@@ -856,7 +873,11 @@ class GenPayloadCli:
         """
         span = trace.get_current_span()
         self.logger.debug("Checking for mismatched sibling sources...")
-        group_images: List = list(assembly_inspector.get_group_release_images().values())
+        group_images: List = [
+            img
+            for img in assembly_inspector.get_group_release_images().values()
+            if img and img.get_image_meta().is_payload
+        ]
         issues = []
         for mismatched, sibling in self.payload_generator.find_mismatched_siblings(group_images):
             component = mismatched.get_image_meta().distgit_key
@@ -1080,6 +1101,7 @@ class GenPayloadCli:
 
         public_entries_for_arch: Dict[str, Dict[str, PayloadEntry]] = dict()  # arch => img tag => PayloadEntry
         private_entries_for_arch: Dict[str, Dict[str, PayloadEntry]] = dict()  # arch => img tag => PayloadEntry
+        registry_config = os.getenv("QUAY_AUTH_FILE")
 
         arches = (
             self.runtime.group_config.konflux.arches if self.runtime.build_system == 'konflux' else self.runtime.arches
@@ -1094,7 +1116,9 @@ class GenPayloadCli:
             entries: Dict[str, PayloadEntry]  # Key of this dict is release payload tag name
             payload_issues: List[AssemblyIssue]
             public_repo = self.full_component_repo(repo_type=RepositoryType.PUBLIC)
-            entries, payload_issues = self.payload_generator.find_payload_entries(assembly_inspector, arch, public_repo)
+            entries, payload_issues = self.payload_generator.find_payload_entries(
+                assembly_inspector, arch, public_repo, registry_config=registry_config
+            )
 
             public_entries: Dict[str, PayloadEntry] = dict()
             for k, v in entries.items():
@@ -1155,7 +1179,10 @@ class GenPayloadCli:
             self.assembly_issues.extend(embargo_issues)
 
             private_entries, private_payload_issues = self.payload_generator.find_payload_entries(
-                assembly_inspector, arch, self.full_component_repo(repo_type=RepositoryType.PRIVATE)
+                assembly_inspector,
+                arch,
+                self.full_component_repo(repo_type=RepositoryType.PRIVATE),
+                registry_config=registry_config,
             )
             private_entries_for_arch[arch] = private_entries
 
@@ -1409,7 +1436,7 @@ class GenPayloadCli:
                 'login',
                 '--registry',
                 'quay.io/redhat-user-workloads',
-                f'--registry-config={os.getenv("KONFLUX_ART_IMAGES_AUTH_FILE")}',
+                f'--registry-config={os.getenv("QUAY_AUTH_FILE")}',
             ]
             await exectools.cmd_assert_async(cmd)
 
@@ -1452,7 +1479,7 @@ class GenPayloadCli:
                     f'--filename={str(src_dest_path)}',
                 ]
                 if self.runtime.build_system == 'konflux':
-                    cmd.append(f'--registry-config={os.getenv("KONFLUX_ART_IMAGES_AUTH_FILE")}')
+                    cmd.append(f'--registry-config={os.getenv("QUAY_AUTH_FILE")}')
                 await asyncio.wait_for(exectools.cmd_assert_async(cmd), timeout=7200)
 
         # Mirror the images in chunks to avoid erroring out due to possible registry issues
@@ -1933,10 +1960,10 @@ class GenPayloadCli:
         # write the manifest list to a file and push it to the registry.
         async with aiofiles.open(component_manifest_path, mode="w+") as ml:
             await ml.write(yaml.safe_dump(dict(image=output_pullspec, manifests=manifests), default_flow_style=False))
-        await manifest_tool(f'push from-spec {str(component_manifest_path)}')
+        await manifest_tool(f'push from-spec {str(component_manifest_path)}', auth_file=os.getenv("QUAY_AUTH_FILE"))
 
         # we are pushing a new manifest list, so return its sha256 based pullspec
-        sha = await find_manifest_list_sha(output_pullspec)
+        sha = await find_manifest_list_sha(output_pullspec, registry_config=os.getenv("QUAY_AUTH_FILE"))
         return exchange_pullspec_tag_for_shasum(output_pullspec, sha)
 
     async def create_multi_release_image(
@@ -1963,22 +1990,24 @@ class GenPayloadCli:
 
         @retry(reraise=True, stop=stop_after_attempt(10), wait=wait_fixed(60))
         async def _run(to_image, to_image_base):
-            return await exectools.cmd_assert_async(
-                [
-                    "oc",
-                    "adm",
-                    "release",
-                    "new",
-                    f"--name={multi_release_name}",
-                    "--reference-mode=source",
-                    "--keep-manifest-list",
-                    f"--from-image-stream-file={str(multi_release_is_path)}",
-                    f"--to-image-base={to_image_base}",
-                    f"--to-image={to_image}",
-                    "--metadata",
-                    json.dumps({"release.openshift.io/architecture": "multi"}),
-                ]
-            )
+            cmd = [
+                "oc",
+                "adm",
+                "release",
+                "new",
+                f"--name={multi_release_name}",
+                "--reference-mode=source",
+                "--keep-manifest-list",
+                f"--from-image-stream-file={str(multi_release_is_path)}",
+                f"--to-image-base={to_image_base}",
+                f"--to-image={to_image}",
+                "--metadata",
+                json.dumps({"release.openshift.io/architecture": "multi"}),
+            ]
+            registry_config = os.getenv("QUAY_AUTH_FILE")
+            if registry_config:
+                cmd.append(f"--registry-config={registry_config}")
+            return await exectools.cmd_assert_async(cmd)
 
         # This will map arch names to a release payload pullspec we create for that arch
         # (i.e. based on the arch's CVO image)
@@ -2030,10 +2059,10 @@ class GenPayloadCli:
         async with aiofiles.open(release_payload_ml_path, mode="w+") as ml:
             await ml.write(yaml.safe_dump(ml_dict, default_flow_style=False))
 
-        await manifest_tool(f'push from-spec {str(release_payload_ml_path)}')
+        await manifest_tool(f'push from-spec {str(release_payload_ml_path)}', auth_file=os.getenv("QUAY_AUTH_FILE"))
 
         # if we are actually pushing a manifest list, then we should derive a sha256 based pullspec
-        sha = await find_manifest_list_sha(multi_release_dest)
+        sha = await find_manifest_list_sha(multi_release_dest, registry_config=os.getenv("QUAY_AUTH_FILE"))
         return exchange_pullspec_tag_for_shasum(multi_release_dest, sha)
 
     async def apply_multi_imagestream_update(
@@ -2206,8 +2235,16 @@ class PayloadGenerator:
             # If an artist overrides one sibling's git url, but not another, the following
             # scan would not be able to detect that they were siblings. Instead, we rely on the
             # original image metadata to determine sibling-ness.
-            source_url = build_record_inspector.get_image_meta().raw_config.content.source.git.url
+            raw_source = build_record_inspector.get_image_meta().raw_config.content.source
 
+            if raw_source.allow_mismatched_siblings:
+                logger.info(
+                    "Skipping sibling check for %s (allow_mismatched_siblings is set)",
+                    build_record_inspector.get_image_meta().distgit_key,
+                )
+                continue
+
+            source_url = raw_source.git.url
             source_git_commit = build_record_inspector.get_source_git_commit()
             if not source_url or not source_git_commit:
                 # This is true for distgit only components.
@@ -2358,7 +2395,12 @@ class PayloadGenerator:
             for pkg in consistent_pkgs:
                 issues.append(
                     self.validate_pkg_consistency_req(
-                        payload_tag, pkg, bbii, rhcos_rpm_vrs, str(primary_rhcos_build), package_rpm_finder
+                        payload_tag,
+                        pkg,
+                        bbii,
+                        rhcos_rpm_vrs,
+                        str(primary_rhcos_build),
+                        package_rpm_finder or self.package_rpm_finder,
                     )
                 )
 
@@ -2373,20 +2415,83 @@ class PayloadGenerator:
         rhcos_build_id: str,
         package_rpm_finder=None,
     ) -> Optional[AssemblyIssue]:
-        """check that the specified package in the member is consistent with the RHCOS build"""
+        """
+        Check that the specified package in the member is consistent with the RHCOS build.
+
+        For Konflux builds, this also detects when multiple versions of the same package
+        are installed (e.g., two different kernel versions), which should never happen.
+        """
         logger = bri.runtime.logger
         payload_tag_nvr: str = bri.get_nvr()
         logger.debug(f"Checking consistency of {pkg} for {payload_tag_nvr} against {rhcos_build_id}")
-        member_nvrs: Dict[str, Dict] = bri.get_all_installed_package_build_dicts(package_rpm_finder)  # by name
-        try:
-            build = member_nvrs[pkg]
-        except KeyError:
-            return AssemblyIssue(
-                f"RHCOS consistency configuration specifies that payload tag '{payload_tag}' "
-                f"should install package '{pkg}', but it does not",
-                payload_tag,
-                AssemblyIssueCode.FAILED_CONSISTENCY_REQUIREMENT,
-            )
+
+        # For Konflux, get ALL installed package NVRs to detect duplicates
+        # For Brew, use the old method (only one version per package is expected)
+        if self.runtime.build_system == 'konflux':
+            # Access the build record directly to get all installed packages
+            build_record = bri.get_build_obj()  # Returns KonfluxBuildRecord
+            installed_packages = build_record.installed_packages  # List of package NVRs
+
+            # Filter for packages matching the name we're checking
+            matching_packages = [pkg_nvr for pkg_nvr in installed_packages if parse_nvr(pkg_nvr)['name'] == pkg]
+
+            if not matching_packages:
+                return AssemblyIssue(
+                    f"RHCOS consistency configuration specifies that payload tag '{payload_tag}' "
+                    f"should install package '{pkg}', but it does not",
+                    payload_tag,
+                    AssemblyIssueCode.FAILED_CONSISTENCY_REQUIREMENT,
+                )
+
+            # Check if there are multiple versions of the same package installed
+            if len(matching_packages) > 1:
+                return AssemblyIssue(
+                    f"Payload tag '{payload_tag}' has multiple versions of package '{pkg}' installed: "
+                    f"{', '.join(matching_packages)}. Only one version should be present.",
+                    payload_tag,
+                    AssemblyIssueCode.FAILED_CONSISTENCY_REQUIREMENT,
+                )
+
+            # Get the single package build dict
+            pkg_finder = package_rpm_finder or self.package_rpm_finder
+            pkg_finder._cache_packages(matching_packages)
+            build = pkg_finder._packages_build_dicts[matching_packages[0]]
+
+        else:  # Brew
+            # First, check for duplicate packages in Brew builds
+            # Although OSBS should enforce single versions, check to be safe
+            all_rpm_dicts = bri.get_all_installed_rpm_dicts()
+            matching_package_nvrs = set()
+            for rpm_dict in all_rpm_dicts:
+                rpm_nvr = rpm_dict['nvr']
+                parsed = parse_nvr(rpm_nvr)
+                if parsed['name'] == pkg:
+                    # Extract package NVR from RPM NVR (RPMs have arch suffix)
+                    # e.g., kernel-5.14.0-427.116.1.el9_4.x86_64 -> kernel-5.14.0-427.116.1.el9_4
+                    package_nvr = f"{parsed['name']}-{parsed['version']}-{parsed['release']}"
+                    matching_package_nvrs.add(package_nvr)
+
+            if not matching_package_nvrs:
+                return AssemblyIssue(
+                    f"RHCOS consistency configuration specifies that payload tag '{payload_tag}' "
+                    f"should install package '{pkg}', but it does not",
+                    payload_tag,
+                    AssemblyIssueCode.FAILED_CONSISTENCY_REQUIREMENT,
+                )
+
+            if len(matching_package_nvrs) > 1:
+                return AssemblyIssue(
+                    f"Payload tag '{payload_tag}' has multiple versions of package '{pkg}' installed: "
+                    f"{', '.join(sorted(matching_package_nvrs))}. Only one version should be present.",
+                    payload_tag,
+                    AssemblyIssueCode.FAILED_CONSISTENCY_REQUIREMENT,
+                )
+
+            # Get the build dict using the old method (now we know there's only one)
+            member_nvrs: Dict[str, Dict] = bri.get_all_installed_package_build_dicts(
+                package_rpm_finder or self.package_rpm_finder
+            )  # by name
+            build = member_nvrs[pkg]  # We know this exists now
 
         # get names of all the actual RPMs included in this package build, because that's what we
         # have for comparison in the RHCOS metadata (not the package name).
@@ -2429,7 +2534,7 @@ class PayloadGenerator:
         return f"{dest_repo}:{tag}"
 
     def find_payload_entries(
-        self, assembly_inspector: AssemblyInspector, arch: str, dest_repo: str
+        self, assembly_inspector: AssemblyInspector, arch: str, dest_repo: str, registry_config: str = None
     ) -> (Dict[str, PayloadEntry], List[AssemblyIssue]):
         """
         Returns a list of images which should be included in the architecture specific release payload.
@@ -2437,12 +2542,15 @@ class PayloadGenerator:
         :param assembly_inspector: An analyzer for the assembly to generate entries for.
         :param arch: The brew architecture name to create the list for.
         :param dest_repo: The registry/org/repo into which the image should be mirrored.
+        :param registry_config: Optional path to registry auth config file.
         :return: Map[payload_tag_name] -> PayloadEntry.
         """
 
         members: Dict[str, PayloadEntry] = self._find_initial_payload_entries(assembly_inspector, arch, dest_repo)
         members = self._replace_missing_payload_entries(members, arch)
-        rhcos_members, issues = self._find_rhcos_payload_entries(assembly_inspector, arch)
+        rhcos_members, issues = self._find_rhcos_payload_entries(
+            assembly_inspector, arch, registry_config=registry_config
+        )
         members.update(rhcos_members)
         return members, issues
 
@@ -2491,7 +2599,7 @@ class PayloadGenerator:
     @staticmethod
     @TRACER.start_as_current_span("PayloadGenerator._find_rhcos_payload_entries")
     def _find_rhcos_payload_entries(
-        assembly_inspector: AssemblyInspector, arch: str
+        assembly_inspector: AssemblyInspector, arch: str, registry_config: str = None
     ) -> Tuple[Dict[str, PayloadEntry], List[AssemblyIssue]]:
         span = trace.get_current_span()
         span.set_attributes(
@@ -2501,7 +2609,7 @@ class PayloadGenerator:
         )
         members: Dict[str, PayloadEntry] = dict()
         issues: List[AssemblyIssue] = list()
-        rhcos_build: RHCOSBuildInspector = assembly_inspector.get_rhcos_build(arch)
+        rhcos_build: RHCOSBuildInspector = assembly_inspector.get_rhcos_build(arch, registry_config=registry_config)
         for container_config in rhcos_build.get_container_configs():
             try:
                 members[container_config.name] = PayloadEntry(
@@ -2736,7 +2844,10 @@ class PayloadGenerator:
 
         payload_entries: Dict[str, PayloadEntry]
         issues: List[AssemblyIssue]
-        payload_entries, issues = self.find_payload_entries(assembly_inspector, arch, "")
+        registry_config = os.getenv("QUAY_AUTH_FILE")
+        payload_entries, issues = self.find_payload_entries(
+            assembly_inspector, arch, "", registry_config=registry_config
+        )
         rhcos_container_configs = {tag.name: tag for tag in rhcos.get_container_configs(runtime)}
         for component_tag in release_info.references.spec.tags:  # For each tag in the imagestream
             payload_tag_name: str = component_tag.name  # e.g. "aws-ebs-csi-driver"

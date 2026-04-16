@@ -10,6 +10,7 @@ from multiprocessing import Event
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
 from artcommonlib import util as artlib_util
+from artcommonlib.constants import GOLANG_BUILDER_IMAGE_NAME
 from artcommonlib.konflux.konflux_build_record import ArtifactType, Engine, KonfluxBuildOutcome, KonfluxBuildRecord
 from artcommonlib.model import Missing, Model
 from artcommonlib.pushd import Dir
@@ -50,7 +51,9 @@ def extract_builder_info_from_pullspec(pullspec: str) -> tuple[int | None, tuple
     try:
         # Try to extract versions from the tag (fast path)
         if ':' in pullspec:
-            tag = pullspec.split(':')[-1]
+            # Strip digest (@sha256:...) if present before extracting tag
+            pullspec_without_digest = pullspec.split('@')[0]
+            tag = pullspec_without_digest.split(':')[-1]
             # Extract RHEL version from patterns like rhel-9, rhel9, ubi-9, ubi9, centos-9, centos9
             match = re.search(r'(?:rhel|ubi|centos)-?(\d+)', tag)
             if match:
@@ -206,11 +209,26 @@ class ImageMetadata(Metadata):
     def get_olm_bundle_delivery_repo_name(self):
         """Returns the delivery repository name for the OLM bundle of this OLM operator.
 
+        If delivery.delivery_repo_name_override is true, the first entry from delivery.delivery_repo_names
+        is used as the delivery repo name. Exactly one entry must be present in that case.
+
         :return: The delivery repository name for the OLM bundle.
-        :raises IOError: If the image is not an OLM operator.
+        :raises IOError: If the image is not an OLM operator, or if the delivery repo name cannot be determined.
         """
         if not self.is_olm_operator:
             raise IOError(f"[{self.distgit_key}] No update-csv config found in the image's metadata")
+        if self.config.delivery.delivery_repo_name_override:
+            delivery_repo_names = self.config.delivery.delivery_repo_names
+            if delivery_repo_names is Missing or not delivery_repo_names:
+                raise IOError(
+                    f"[{self.distgit_key}] delivery_repo_name_override is set but delivery.delivery_repo_names is empty"
+                )
+            if len(delivery_repo_names) != 1:
+                raise IOError(
+                    f"[{self.distgit_key}] delivery_repo_name_override is set but delivery.delivery_repo_names has "
+                    f"{len(delivery_repo_names)} entries (expected exactly 1)"
+                )
+            return cast(str, delivery_repo_names[0])
         repo_name = self.config.delivery.bundle_delivery_repo_name
         if repo_name is Missing:
             raise IOError(
@@ -866,6 +884,20 @@ class ImageMetadata(Metadata):
                 break
 
         if not matched:
+            # For OKD variant, RHEL version mismatches are expected (e.g., OKD 5.0 uses el10 while upstream uses el9)
+            # Log a warning instead of raising an error to allow canonical builders to work
+            from artcommonlib.variants import BuildVariant
+
+            if self.runtime.variant == BuildVariant.OKD:
+                self.logger.warning(
+                    '[%s] OKD variant: Upstream uses el%s but ART uses el%s. '
+                    'No alternative_upstream config found, but continuing anyway for OKD.',
+                    self.distgit_key,
+                    upstream_intended_el_version,
+                    art_intended_el_version,
+                )
+                return
+
             raise IOError(
                 f'[{self.distgit_key}] Upstream uses el{upstream_intended_el_version} but ART uses '
                 f'el{art_intended_el_version}, and no matching alternative_upstream config was found. '
@@ -979,9 +1011,10 @@ class ImageMetadata(Metadata):
         Determines whether lockfile generation is enabled for the current image configuration.
 
         The method checks preconditions in the following order:
-        1. Cachi2 feature must be enabled
-        2. enabled_repos must be defined and not empty
-        3. Lockfile generation overrides:
+        1. Network mode must be "hermetic" (lockfiles only for hermetic builds)
+        2. Cachi2 feature must be enabled
+        3. enabled_repos must be defined and not empty
+        4. Lockfile generation overrides:
            - Image metadata configuration (`self.config.konflux.cachi2.lockfile.enabled`)
            - Group configuration (`self.runtime.group_config.konflux.cachi2.lockfile.enabled`)
         If no override is set, lockfile generation defaults to enabled.
@@ -989,6 +1022,12 @@ class ImageMetadata(Metadata):
         Returns:
             bool: True if lockfile generation is enabled, False otherwise.
         """
+        # Early network mode check - lockfiles only for hermetic builds
+        network_mode = self.get_konflux_network_mode()
+        if network_mode != "hermetic":
+            self.logger.info(f"Lockfile generation disabled: network mode is '{network_mode}' (requires 'hermetic')")
+            return False
+
         lockfile_enabled = True
 
         # First check: cachi2 must be enabled
@@ -1075,12 +1114,17 @@ class ImageMetadata(Metadata):
 
         return False
 
-    async def fetch_rpms_from_build(self) -> set[str]:
+    async def fetch_rpms_from_build(self, lockfile_seed_nvrs: Optional[list[str]] = None) -> set[str]:
         """
         Fetch RPM packages from database installed_rpms field.
 
         Returns either the full image RPM set or difference from parent packages,
         based on the inspect_parent configuration. Caches result in installed_rpms attribute.
+
+        Args:
+            lockfile_seed_nvrs: NVRs of builds whose installed RPMs should seed lockfile
+                generation. When provided, the method checks these NVRs first and uses the
+                matching build record instead of the latest build.
 
         Returns:
             set[str]: Source RPM package names - full set if inspect_parent=False,
@@ -1091,15 +1135,24 @@ class ImageMetadata(Metadata):
             return set(self.installed_rpms)
 
         try:
-            base_search_params = {
-                'group': self.runtime.group,
-                'outcome': "success",
-                'engine': self.runtime.build_system,
-            }
+            build = None
+            if lockfile_seed_nvrs:
+                for nvr in lockfile_seed_nvrs:
+                    candidate = await self.runtime.konflux_db.get_build_record_by_nvr(nvr=nvr, strict=False)
+                    if candidate and candidate.name == self.distgit_key:
+                        self.logger.info(f"Using seed NVR {nvr} for {self.distgit_key}")
+                        build = candidate
+                        break
 
-            base_search_params['name'] = self.distgit_key
-            # Need installed_rpms column for this operation, so don't exclude any columns
-            build = await self.runtime.konflux_db.get_latest_build(**base_search_params)
+            if build is None:
+                base_search_params = {
+                    'group': self.runtime.group,
+                    'outcome': "success",
+                    'engine': self.runtime.build_system,
+                    'name': self.distgit_key,
+                }
+                build = await self.runtime.konflux_db.get_latest_build(**base_search_params)
+
             if not build:
                 self.logger.debug(f"No build record found for {self.distgit_key}/{self.runtime.group}")
                 self.installed_rpms = []
@@ -1122,7 +1175,7 @@ class ImageMetadata(Metadata):
             self.installed_rpms = []
             return set()
 
-    async def get_lockfile_rpms_to_install(self) -> set[str]:
+    async def get_lockfile_rpms_to_install(self, lockfile_seed_nvrs: Optional[list[str]] = None) -> set[str]:
         """
         Get the union of RPMs from build and lockfile configuration for lockfile generation.
 
@@ -1133,13 +1186,16 @@ class ImageMetadata(Metadata):
         The method follows the same pattern as other lockfile-related methods,
         checking if lockfile generation is enabled before proceeding.
 
+        Args:
+            lockfile_seed_nvrs: Passed through to fetch_rpms_from_build.
+
         Returns:
             set[str]: Union of RPM package names from both sources, or empty set if
                      lockfile generation is not enabled
         """
 
         # Get RPMs from build
-        rpms_from_build = await self.fetch_rpms_from_build()
+        rpms_from_build = await self.fetch_rpms_from_build(lockfile_seed_nvrs=lockfile_seed_nvrs)
 
         # Get RPMs from lockfile config
         rpms_from_config = set()
@@ -1233,6 +1289,65 @@ class ImageMetadata(Metadata):
                 self.logger.info(f"Artifact lockfile generation set from group config {artifact_lockfile_enabled}")
 
         return artifact_lockfile_enabled
+
+    def is_base_image(self) -> bool:
+        """
+        Determines whether this image is configured as a base image.
+
+        Base images are identified by the base_only: true configuration field.
+        These images require special snapshot-to-release workflow processing
+        to generate dual URLs for streams.yml updates.
+
+        Returns:
+            bool: True if this is a base image (base_only: true), False otherwise
+        """
+        base_only_config = getattr(self.config, 'base_only', Missing)
+        if base_only_config not in [Missing, None]:
+            return bool(base_only_config)
+        return False
+
+    def is_golang_builder(self) -> bool:
+        """
+        Determines whether this image is a golang builder image.
+
+        Golang builders are identified by having a name that matches
+        the GOLANG_BUILDER_IMAGE_NAME constant.
+
+        Returns:
+            bool: True if this is a golang builder image, False otherwise
+        """
+        return hasattr(self.config, 'name') and self.config.name == GOLANG_BUILDER_IMAGE_NAME
+
+    def should_trigger_base_image_release(self) -> bool:
+        """
+        Determines whether this image should trigger the base image release workflow.
+
+        The base image release workflow should be triggered for both:
+        - Base images (base_only: true)
+        - Golang builder images
+
+        These image types require special snapshot-to-release workflow processing
+        to generate dual URLs for streams.yml updates.
+
+        Returns:
+            bool: True if base image release workflow should be triggered, False otherwise
+        """
+        return self.is_base_image() or self.is_golang_builder()
+
+    def is_snapshot_release_enabled(self) -> bool:
+        """
+        Determines whether snapshot-to-release workflow is enabled for this image.
+
+        The snapshot_release flag controls whether base images should trigger
+        the snapshot-to-release workflow when builds complete.
+
+        Returns:
+            bool: True if snapshot_release: true is configured, True by default if not specified
+        """
+        snapshot_release_config = getattr(self.config, 'snapshot_release', Missing)
+        if snapshot_release_config not in [Missing, None]:
+            return bool(snapshot_release_config)
+        return True
 
     def get_required_artifacts(self) -> list:
         """

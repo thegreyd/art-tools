@@ -23,6 +23,7 @@ from artcommonlib.arch_util import brew_arch_for_go_arch
 from artcommonlib.assembly import AssemblyTypes
 from artcommonlib.config.repo import RepoList
 from artcommonlib.constants import SHIPMENT_DATA_URL_TEMPLATE
+from artcommonlib.github_auth import get_github_client_for_org
 from artcommonlib.gitlab import GitLabClient
 from artcommonlib.konflux.konflux_build_record import ArtifactType, Engine, KonfluxBuildOutcome, KonfluxBuildRecord
 from artcommonlib.konflux.konflux_db import KonfluxDb
@@ -38,7 +39,7 @@ from doozerlib.backend.konflux_image_builder import KonfluxImageBuilder
 from doozerlib.constants import KONFLUX_DEFAULT_IMAGE_REPO
 from doozerlib.util import isolate_git_commit_in_release
 from elliottlib.shipment_model import ShipmentConfig, Snapshot, SnapshotSpec
-from github import Github, GithubException
+from github import GithubException
 
 from pyartcd import constants, jenkins, oc
 from pyartcd.cli import cli, click_coroutine, pass_runtime
@@ -72,10 +73,13 @@ class BuildMicroShiftBootcPipeline:
         prepare_shipment: bool,
         data_path: str,
         slack_client,
+        data_gitref: str | None = None,
         logger: Optional[logging.Logger] = None,
     ):
         self.runtime = runtime
         self.group = group
+        self.data_gitref = data_gitref or ""
+        self.doozer_group = f"{self.group}@{self.data_gitref}" if self.data_gitref else self.group
         self.assembly = assembly
         self.force = force
         self.force_plashet_sync = force_plashet_sync
@@ -85,14 +89,6 @@ class BuildMicroShiftBootcPipeline:
 
         # Track existing shipment timestamp to avoid creating new files on MR updates
         self.existing_shipment_timestamp = None
-
-        # Check if GitHub token is available (unless in dry-run mode)
-        if not runtime.dry_run:
-            github_token = os.environ.get("GITHUB_TOKEN")
-            if not github_token or not github_token.strip():
-                raise ValueError("GITHUB_TOKEN environment variable is required to create pull requests")
-
-        self.github_client = Github(os.environ.get("GITHUB_TOKEN"))
 
         self._working_dir = self.runtime.working_dir.absolute()
         self.releases_config = None
@@ -136,7 +132,7 @@ class BuildMicroShiftBootcPipeline:
             self._elliott_env_vars["ELLIOTT_DATA_PATH"] = data_path
 
         # Setup Elliott base command for shipment operations
-        group_param = f'--group={group}'
+        group_param = f'--group={self.doozer_group}'
         self._elliott_base_command = [
             'elliott',
             group_param,
@@ -150,14 +146,14 @@ class BuildMicroShiftBootcPipeline:
         # Make sure our api.ci token is fresh
         await oc.registry_login()
         data_path = self._doozer_env_vars["DOOZER_DATA_PATH"]
-        self.releases_config = await load_releases_config(
-            group=self.group,
-            data_path=data_path,
-        )
+        self.releases_config = await load_releases_config(group=self.doozer_group, data_path=data_path)
         self.assembly_type = get_assembly_type(self.releases_config, self.assembly)
         # Load group config
         self.group_config = await load_group_config(
-            group=self.group, assembly=self.assembly, doozer_data_path=data_path
+            group=self.group,
+            assembly=self.assembly,
+            doozer_data_path=data_path,
+            doozer_data_gitref=self.data_gitref,
         )
         bootc_build = await self._rebase_and_build_bootc()
         if bootc_build:
@@ -174,7 +170,7 @@ class BuildMicroShiftBootcPipeline:
             'quay.io/redhat-user-workloads',
         ]
 
-        konflux_registry_auth_file = os.getenv("KONFLUX_ART_IMAGES_AUTH_FILE")
+        konflux_registry_auth_file = os.getenv("QUAY_AUTH_FILE")
         if konflux_registry_auth_file:
             cmd += [f'--registry-config={konflux_registry_auth_file}']
         await exectools.cmd_assert_async(cmd)
@@ -367,7 +363,9 @@ class BuildMicroShiftBootcPipeline:
                         f" {url}, but could not find it. Use --force to rebuild plashet."
                     )
 
-                microshift_nvrs = await get_microshift_builds(self.group, self.assembly, env=self._elliott_env_vars)
+                microshift_nvrs = await get_microshift_builds(
+                    self.doozer_group, self.assembly, env=self._elliott_env_vars
+                )
                 expected_microshift_nvr = next(
                     (n for n in microshift_nvrs if isolate_el_version_in_release(n) == 9), None
                 )
@@ -394,6 +392,7 @@ class BuildMicroShiftBootcPipeline:
             assembly=self.assembly,
             repos=[microshift_plashet_name],
             data_path=self._doozer_env_vars["DOOZER_DATA_PATH"],
+            data_gitref=self.data_gitref,
             dry_run=self.runtime.dry_run,
             block_until_complete=True,
         )
@@ -406,7 +405,7 @@ class BuildMicroShiftBootcPipeline:
         Return Value(s):
             str: The abbreviated git commit hash extracted from the RPM NVR.
         """
-        microshift_nvrs = await get_microshift_builds(self.group, self.assembly, env=self._elliott_env_vars)
+        microshift_nvrs = await get_microshift_builds(self.doozer_group, self.assembly, env=self._elliott_env_vars)
         if not microshift_nvrs:
             raise ValueError(
                 f"Could not find microshift RPM NVRs for assembly {self.assembly}. "
@@ -426,6 +425,27 @@ class BuildMicroShiftBootcPipeline:
             f"Could not extract git commit from any microshift RPM NVR: {microshift_nvrs}. "
             f"The NVR release fields do not contain a recognizable commit hash."
         )
+
+    def _get_assembly_label_value(self) -> Optional[str]:
+        """Compute the value for the assembly Dockerfile label.
+
+        - STANDARD (e.g. assembly ``4.18.1``): ``v4.18.1``
+        - CANDIDATE / PREVIEW (e.g. assembly ``rc.1``): ``v4.22.0-rc.1``
+        - CUSTOM: raises – not supported for microshift-bootc
+        - STREAM: returns None (label is omitted)
+        """
+        if self.assembly_type == AssemblyTypes.STREAM:
+            return None
+        major, minor = self._ocp_version
+        if self.assembly_type == AssemblyTypes.STANDARD:
+            return f"v{self.assembly}"
+        if self.assembly_type in (AssemblyTypes.CANDIDATE, AssemblyTypes.PREVIEW):
+            return f"v{major}.{minor}.0-{self.assembly}"
+        if self.assembly_type == AssemblyTypes.CUSTOM:
+            raise ValueError(
+                f"Assembly type CUSTOM is not supported for microshift-bootc builds (assembly={self.assembly})"
+            )
+        raise ValueError(f"Assembly type {self.assembly_type} is not supported for microshift-bootc builds")
 
     async def _rebase_and_build_bootc(self):
         bootc_image_name = "microshift-bootc"
@@ -480,13 +500,16 @@ class BuildMicroShiftBootcPipeline:
         # Extract the commit from the microshift RPM to ensure bootc is built from the same source
         upstream_commit = await self._get_microshift_rpm_commit()
 
+        # Determine the assembly label value based on assembly type
+        assembly_label_value = self._get_assembly_label_value()
+
         # Rebase and build bootc image
-        version = f"v{major}.{minor}.0"
+        version = f"v{major}.{minor}"
         release = default_release_suffix()
         rebase_cmd = [
             "doozer",
             "--group",
-            self.group,
+            self.doozer_group,
             "--assembly",
             self.assembly,
             "--latest-parent-version",
@@ -505,6 +528,10 @@ class BuildMicroShiftBootcPipeline:
             version,
             "--release",
             release,
+        ]
+        if assembly_label_value:
+            rebase_cmd += ["--extra-label", f"assembly={assembly_label_value}"]
+        rebase_cmd += [
             "--message",
             f"Updating Dockerfile version and release {version}-{release}",
         ]
@@ -515,7 +542,7 @@ class BuildMicroShiftBootcPipeline:
         build_cmd = [
             "doozer",
             "--group",
-            self.group,
+            self.doozer_group,
             "--assembly",
             self.assembly,
             "--latest-parent-version",
@@ -609,7 +636,8 @@ class BuildMicroShiftBootcPipeline:
             return "https://github.example.com/foo/bar/pull/1234"
 
         user, repo = self.extract_git_repo(self._doozer_env_vars["DOOZER_DATA_PATH"])
-        upstream_repo = self.github_client.get_repo(f"{user}/{repo}")
+        github_client = get_github_client_for_org(user)
+        upstream_repo = github_client.get_repo(f"{user}/{repo}")
         release_file_content = yaml.load(upstream_repo.get_contents("releases.yml", ref=self.group).decoded_content)
         source_file_content = copy.deepcopy(release_file_content)
         self._pin_image_nvr(nvr, release_file_content)
@@ -659,9 +687,8 @@ class BuildMicroShiftBootcPipeline:
                 raise TimeoutError(error_msg)
 
             # Refresh PR to get latest status
-            pr = self.github_client.get_repo(
-                f"{self.extract_git_repo(self._doozer_env_vars['DOOZER_DATA_PATH'])[0]}/{self.extract_git_repo(self._doozer_env_vars['DOOZER_DATA_PATH'])[1]}"
-            ).get_pull(pr.number)
+            user, repo = self.extract_git_repo(self._doozer_env_vars['DOOZER_DATA_PATH'])
+            pr = get_github_client_for_org(user).get_repo(f"{user}/{repo}").get_pull(pr.number)
 
             # Check if PR was closed/merged by someone else
             if pr.state == "closed":
@@ -862,9 +889,9 @@ class BuildMicroShiftBootcPipeline:
             nvr,
         ]
 
-        konflux_art_images_auth_file = os.getenv("KONFLUX_ART_IMAGES_AUTH_FILE")
-        if konflux_art_images_auth_file:
-            snapshot_cmd.append(f"--pull-secret={konflux_art_images_auth_file}")
+        quay_auth_file = os.getenv("QUAY_AUTH_FILE")
+        if quay_auth_file:
+            snapshot_cmd.append(f"--pull-secret={quay_auth_file}")
 
         stdout = await self._execute_command_with_logging(snapshot_cmd)
 
@@ -1052,6 +1079,12 @@ class BuildMicroShiftBootcPipeline:
     is_flag=True,
     help="(For named assemblies) Prepare shipment with found microshift-bootc build",
 )
+@click.option(
+    "--data-gitref",
+    required=False,
+    default="",
+    help="Doozer data path git [branch / tag / sha] to use",
+)
 @pass_runtime
 @click_coroutine
 async def build_microshift_bootc(
@@ -1062,6 +1095,7 @@ async def build_microshift_bootc(
     force: bool,
     force_plashet_sync: bool,
     prepare_shipment: bool,
+    data_gitref: str | None = None,
 ):
     # slack client is dry-run aware and will not send messages if dry-run is enabled
     slack_client = runtime.new_slack_client()
@@ -1076,6 +1110,7 @@ async def build_microshift_bootc(
             prepare_shipment=prepare_shipment,
             data_path=data_path,
             slack_client=slack_client,
+            data_gitref=data_gitref,
         )
         await pipeline.run()
     except Exception as err:

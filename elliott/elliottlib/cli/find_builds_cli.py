@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 import sys
 
@@ -8,7 +9,7 @@ import koji
 import requests
 from artcommonlib import logutil
 from artcommonlib.arch_util import BREW_ARCHES
-from artcommonlib.assembly import assembly_metadata_config, assembly_rhcos_config
+from artcommonlib.assembly import assembly_excluded_components, assembly_metadata_config, assembly_rhcos_config
 from artcommonlib.constants import COREOS_RHEL10_STREAMS
 from artcommonlib.format_util import green_print, red_print, yellow_print
 from artcommonlib.konflux.konflux_build_record import KonfluxBuildRecord, KonfluxBundleBuildRecord
@@ -356,7 +357,8 @@ def get_rhcos_nvrs_from_assembly(runtime: Runtime, brew_session: koji.ClientSess
             continue
 
         for arch, pullspec in config['images'].items():
-            build_id = get_build_id_from_rhcos_pullspec(pullspec)
+            registry_config = os.getenv("QUAY_AUTH_FILE")
+            build_id = get_build_id_from_rhcos_pullspec(pullspec, registry_config=registry_config)
             if arch not in build_ids_by_arch:
                 build_ids_by_arch[arch] = set()
             build_ids_by_arch[arch].add(build_id)
@@ -482,9 +484,15 @@ async def _fetch_builds_by_kind_image(
     non_payload_only: bool,
     include_shipped: bool,
 ):
+    excluded = assembly_excluded_components(runtime.get_releases_config(), runtime.assembly, 'image')
     image_metas: list[ImageMetadata] = []
     for image in runtime.image_metas():
         if image.base_only or not image.is_release:
+            continue
+        if image.distgit_key in excluded:
+            if image.is_payload:
+                raise ElliottFatalError(f'Payload image {image.distgit_key} cannot be excluded in assembly definition')
+            LOGGER.info(f'Excluding image {image.distgit_key} per assembly definition')
             continue
         if (payload_only and not image.is_payload) or (non_payload_only and image.is_payload):
             continue
@@ -572,6 +580,14 @@ async def _fetch_builds_by_kind_rpm(
                 f"Assembly {runtime.assembly} is not appliable for build sweep because it contains RHCOS specific dependencies for a custom release."
             )
 
+    excluded = assembly_excluded_components(runtime.get_releases_config(), runtime.assembly, 'rpm')
+    excluded_component_names: set[str] = set()
+    for dk in excluded:
+        rpm_meta = runtime.rpm_map.get(dk)
+        if rpm_meta:
+            excluded_component_names.add(rpm_meta.get_component_name())
+            LOGGER.info(f'Excluding rpm {dk} per assembly definition')
+
     builds: list[dict] = []
 
     pinned_nvrs = set()
@@ -580,7 +596,7 @@ async def _fetch_builds_by_kind_rpm(
             tasks = [
                 rpm.get_latest_build(default=None, el_target=tag, exclude_large_columns=True)
                 for rpm in runtime.rpm_metas()
-                if tag in rpm.determine_targets()
+                if tag in rpm.determine_targets() and rpm.distgit_key not in excluded
             ]
             builds_for_tag = await asyncio.gather(*tasks)
             builds.extend(filter(lambda b: b is not None, builds_for_tag))
@@ -634,6 +650,8 @@ async def _fetch_builds_by_kind_rpm(
                         )
                 component_builds.update(group_deps)
                 pinned_nvrs.update([b['nvr'] for b in group_deps.values()])
+            for name in excluded_component_names:
+                component_builds.pop(name, None)
             builds.extend(component_builds.values())
 
     LOGGER.info(f"Found {len(builds)} qualified rpm builds")
@@ -705,20 +723,26 @@ def _filter_out_attached_builds(
 
 async def find_builds_konflux(runtime, payload) -> list[dict]:
     """
-    Find konflux builds for group/assembly, respecting network mode configuration.
+    Find konflux builds for group/assembly.
 
     Args:
         runtime: The runtime object providing access to image metadata and the Konflux database.
         payload: If True, only include payload images; if False, only non-payload images.
 
     Returns:
-        list[dict]: List of build records matching the configured network mode for each image.
+        list[dict]: List of build records for each image.
     """
     runtime.konflux_db.bind(KonfluxBuildRecord)
 
+    excluded = assembly_excluded_components(runtime.get_releases_config(), runtime.assembly, 'image')
     image_metas: list[ImageMetadata] = []
     for image in runtime.image_metas():
         if image.base_only or not image.is_release:
+            continue
+        if image.distgit_key in excluded:
+            if image.is_payload:
+                raise ElliottFatalError(f'Payload image {image.distgit_key} cannot be excluded in assembly definition')
+            LOGGER.info(f'Excluding image {image.distgit_key} per assembly definition')
             continue
         if (payload and not image.is_payload) or (not payload and image.is_payload):
             continue
@@ -726,10 +750,7 @@ async def find_builds_konflux(runtime, payload) -> list[dict]:
 
     LOGGER.info("Fetching NVRs from DB...")
     tasks = [
-        image.get_latest_build(
-            enforce_network_mode=True, el_target=image.branch_el_target(), exclude_large_columns=True
-        )
-        for image in image_metas
+        image.get_latest_build(el_target=image.branch_el_target(), exclude_large_columns=True) for image in image_metas
     ]
     records = await asyncio.gather(*tasks)
     images_not_found: list[str] = [image_metas[i].name for i, r in enumerate(records) if r is None]
@@ -743,11 +764,11 @@ async def find_builds_konflux(runtime, payload) -> list[dict]:
 async def find_builds_konflux_all_types(runtime: Runtime) -> dict[str, list]:
     """
     Find Konflux builds for a group/assembly, separating payload and non-payload images,
-    and fetch related OLM bundle builds. Respects network mode configuration for each image.
+    and fetch related OLM bundle builds.
 
     This function:
     - Iterates over image metadata from the runtime, filtering out base-only and non-release images.
-    - For each image, determines the configured network mode and queries for the latest build matching that mode.
+    - For each image, queries for the latest build.
     - Separates the results into payload and non-payload image builds.
     - For OLM operator images, fetches the related bundle build records from the database.
     - Returns a dictionary with four categorized lists:
@@ -768,9 +789,15 @@ async def find_builds_konflux_all_types(runtime: Runtime) -> dict[str, list]:
     """
     runtime.konflux_db.bind(KonfluxBuildRecord)
 
+    excluded = assembly_excluded_components(runtime.get_releases_config(), runtime.assembly, 'image')
     image_metas: list[tuple[bool, ImageMetadata]] = []
     for image in runtime.image_metas():
         if image.base_only or not image.is_release:
+            continue
+        if image.distgit_key in excluded:
+            if image.is_payload:
+                raise ElliottFatalError(f'Payload image {image.distgit_key} cannot be excluded in assembly definition')
+            LOGGER.info(f'Excluding image {image.distgit_key} per assembly definition')
             continue
         image_metas.append((image.is_payload, image))
 
@@ -782,11 +809,7 @@ async def find_builds_konflux_all_types(runtime: Runtime) -> dict[str, list]:
     for is_payload, image in image_metas:
         olm_flags.append(image.is_olm_operator)
         payload_flags.append(is_payload)
-        tasks.append(
-            image.get_latest_build(
-                enforce_network_mode=True, el_target=image.branch_el_target(), exclude_large_columns=True
-            )
-        )
+        tasks.append(image.get_latest_build(el_target=image.branch_el_target(), exclude_large_columns=True))
     results = await asyncio.gather(*tasks)
     images_not_found: list[str] = [image_metas[i][1].name for i, r in enumerate(results) if r is None]
     if images_not_found:

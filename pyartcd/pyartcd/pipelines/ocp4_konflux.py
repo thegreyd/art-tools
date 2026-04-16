@@ -167,8 +167,8 @@ class KonfluxOcpPipeline:
             return [f'--{kind}=', f'--exclude={",".join(excludes)}']
 
     async def update_rebase_fail_counters(self, failed_images):
-        if self.assembly == 'test':
-            # Ignore for test assembly
+        if self.assembly != 'stream':
+            # Only update fail counters for stream assembly
             return
 
         # Reset fail counters for images that were rebased successfully
@@ -254,7 +254,7 @@ class KonfluxOcpPipeline:
         except ChildProcessError:
             with open(f'{self.runtime.doozer_working}/state.yaml') as state_yaml:
                 state = yaml.safe_load(state_yaml)
-            failed_images = state['images:konflux:rebase'].get('failed-images', [])
+            failed_images = state.get('images:konflux:rebase', {}).get('failed-images', [])
             if not failed_images:
                 raise  # Something else went wrong
 
@@ -468,6 +468,21 @@ class KonfluxOcpPipeline:
             self.slack_client.bind_channel(f'openshift-{self.version}')
             await self.slack_client.say(f'Golang bug sweep failed for {self.version}. Please investigate')
 
+    async def sweep_second_fix_bugs(self):
+        # find-bugs:second-fix closes CVE trackers that are not first-fix in pre-release branches
+        # The command itself checks the software lifecycle phase and only runs for pre-release/signing phases
+        cmd = [
+            'elliott',
+            f'--group=openshift-{self.version}',
+            "find-bugs:second-fix",
+            "--close",
+        ]
+        try:
+            await exectools.cmd_assert_async(cmd)
+        except ChildProcessError:
+            self.slack_client.bind_channel(f'openshift-{self.version}')
+            await self.slack_client.say(f'Second-fix bug sweep failed for {self.version}. Please investigate')
+
     async def init_build_plan(self):
         # Get number of images in current group
         shutil.rmtree(self.runtime.doozer_working, ignore_errors=True)
@@ -672,6 +687,16 @@ class KonfluxOcpPipeline:
             )
 
         await self.rebase_images(f"v{self.version}.0", self.release)
+
+        # ART-14540: Notify component owners about missing branch protection
+        record_log_path = Path(self.runtime.doozer_working) / "record.log"
+        if record_log_path.exists():
+            await util.notify_branch_protection_missing(
+                version=self.version,
+                doozer_working=self.runtime.doozer_working,
+                mail_client=self.runtime.new_mail_client(),
+            )
+
         await self.build_images()
 
         if self.mass_rebuild:
@@ -752,6 +777,10 @@ class KonfluxOcpPipeline:
             if uses_konflux_imagestream_override(self.version):
                 await self.sweep_bugs()
                 await self.sweep_golang_bugs()
+                if not self.runtime.dry_run:
+                    await self.sweep_second_fix_bugs()
+                else:
+                    LOGGER.info('Skipping second-fix bug sweep in dry run mode')
             else:
                 LOGGER.info(
                     f'Skipping bug sweep for {self.version} since it is not in the override list and is handled by ocp4'
@@ -959,6 +988,6 @@ async def ocp4(
         await locks.run_with_lock(
             coro=pipeline.run(),
             lock=Lock.BUILD_KONFLUX,
-            lock_name=Lock.BUILD_KONFLUX.value.format(version=version),
+            lock_name=Lock.BUILD_KONFLUX.value.format(version=version, assembly=assembly),
             lock_id=lock_identifier,
         )

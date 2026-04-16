@@ -544,8 +544,8 @@ def get_release_calc_previous(
     return sort_semver(list(upgrade_from))
 
 
-async def find_manifest_list_sha(pullspec):
-    image_data = await oc_image_info_for_arch_async(pullspec)
+async def find_manifest_list_sha(pullspec, registry_config: str = None):
+    image_data = await oc_image_info_for_arch_async(pullspec, registry_config=registry_config)
     if 'listDigest' not in image_data:
         raise ValueError('Specified image is not a manifest-list.')
     return image_data['listDigest']
@@ -669,7 +669,13 @@ def get_konflux_build_priority(metadata, group):
 
     # 4. Higher than default priority for main & pre-GA N-1 streams.
     if group.startswith("openshift-") and phase in ("pre-release", "signing"):
+        if metadata.children:
+            return higher_by(3)
         return higher_by(2)
+
+    # 5. Non-leaf images get a priority bump since they block dependent builds.
+    if metadata.children:
+        return higher_by(1)
 
     # Default
     return higher_by(0)

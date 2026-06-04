@@ -331,8 +331,17 @@ class BuildRepo:
         # Discover repo metadata using local-only git commands (no auth needed)
         _, url, _ = await exectools.cmd_gather_async(["git", "-C", local_dir, "config", "--get", "remote.origin.url"])
         url = url.strip()
-        _, branch, _ = await exectools.cmd_gather_async(["git", "-C", local_dir, "rev-parse", "--abbrev-ref", "HEAD"])
-        branch = branch.strip()
+        rc, branch, _ = await exectools.cmd_gather_async(
+            ["git", "-C", local_dir, "rev-parse", "--abbrev-ref", "HEAD"], check=False
+        )
+        if rc != 0:
+            # Empty repo with no commits — fall back to the default branch name
+            rc2, default_branch, _ = await exectools.cmd_gather_async(
+                ["git", "-C", local_dir, "config", "--get", "init.defaultBranch"], check=False
+            )
+            branch = default_branch.strip() if rc2 == 0 and default_branch.strip() else "main"
+        else:
+            branch = branch.strip()
 
         pull_url = None
         rc, pull_remote_url, _ = await exectools.cmd_gather_async(

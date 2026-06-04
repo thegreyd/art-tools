@@ -3,6 +3,7 @@ import io
 import logging
 import os
 import re
+import subprocess
 from typing import List, cast
 
 import click
@@ -224,22 +225,61 @@ class UpdateGolangPipeline:
             self.konflux_db = KonfluxDb()
             self.konflux_db.bind(KonfluxBuildRecord)
 
+    def _is_local_data_path(self) -> bool:
+        data_path = self.data_path or constants.OCP_BUILD_DATA_URL
+        return not data_path.startswith(('http://', 'https://', 'git@'))
+
+    def _read_data_file(self, filename: str, ref: str) -> bytes:
+        data_path = self.data_path or constants.OCP_BUILD_DATA_URL
+        if self._is_local_data_path():
+            filepath = os.path.join(data_path, filename)
+            if os.path.isfile(filepath):
+                _LOGGER.info("Reading %s from local path %s", filename, filepath)
+                with open(filepath, 'rb') as f:
+                    return f.read()
+            repo_root = subprocess.check_output(
+                ['git', '-C', data_path, 'rev-parse', '--show-toplevel'],
+                text=True,
+            ).strip()
+            _LOGGER.info("Reading %s:%s via git show from %s", ref, filename, repo_root)
+            return subprocess.check_output(['git', '-C', repo_root, 'show', f'{ref}:{filename}'])
+
+        org, repo_name = self._parse_github_org_repo(data_path)
+        repo = get_github_client_for_org(org).get_repo(f"{org}/{repo_name}")
+        return repo.get_contents(filename, ref=ref).decoded_content
+
+    def _load_data_yaml(self, filename: str, ref: str):
+        return yaml.load(self._read_data_file(filename, ref))
+
     @staticmethod
-    def _load_yaml_from_repo(repo, path: str, ref: str):
-        return yaml.load(repo.get_contents(path, ref=ref).decoded_content)
+    def _parse_github_org_repo(url: str) -> tuple[str, str]:
+        match = re.search(r"github\.com[:/]([^/]+)/([^/.]+)", url)
+        if not match:
+            raise ValueError(f"Cannot parse GitHub org/repo from data path: {url}")
+        return match[1], match[2]
 
     def _get_upstream_ocp_build_data_repo(self):
         return get_github_client_for_org("openshift-eng").get_repo("openshift-eng/ocp-build-data")
 
+    def _read_ocp_branch_file(self, filename: str, branch: str) -> bytes:
+        if self._is_local_data_path():
+            data_path = self.data_path
+            repo_root = subprocess.check_output(
+                ['git', '-C', data_path, 'rev-parse', '--show-toplevel'],
+                text=True,
+            ).strip()
+            _LOGGER.info("Reading %s:%s via git show from %s", branch, filename, repo_root)
+            return subprocess.check_output(['git', '-C', repo_root, 'show', f'{branch}:{filename}'])
+        repo = self._get_upstream_ocp_build_data_repo()
+        return repo.get_contents(filename, ref=branch).decoded_content
+
     def _get_branch_content(self):
         if self._branch_content is None:
             branch = f"openshift-{self.ocp_version}"
-            upstream_repo = self._get_upstream_ocp_build_data_repo()
             self._branch_content = {
                 "branch": branch,
-                "repo": upstream_repo,
-                "group": self._load_yaml_from_repo(upstream_repo, "group.yml", branch),
-                "streams": self._load_yaml_from_repo(upstream_repo, "streams.yml", branch),
+                "group": yaml.load(self._read_ocp_branch_file("group.yml", branch)),
+                "streams": yaml.load(self._read_ocp_branch_file("streams.yml", branch)),
             }
         return self._branch_content
 
@@ -252,9 +292,8 @@ class UpdateGolangPipeline:
         go_latest_var = "GO_LATEST"
         go_latest = vars_content.get(go_latest_var)
         if not go_latest:
-            raise ValueError(
-                f"{go_latest_var} variable not found in group.yml, please make sure it is defined before running the pipeline"
-            )
+            data_path = self.data_path or constants.OCP_BUILD_DATA_URL
+            raise ValueError(f"{go_latest_var} variable not found in {data_path} branch {branch} group.yml vars")
 
         allowed_major_minors = {
             var_name: extract_major_minor(var_value, f"group.yml {var_name}")
@@ -644,16 +683,14 @@ class UpdateGolangPipeline:
         """
         branch_content = self._get_branch_content()
         branch = branch_content["branch"]
-        upstream_repo = branch_content["repo"]
         streams_content = branch_content["streams"]
         group_content = branch_content["group"]
 
         go_latest_var, go_previous_var = "GO_LATEST", "GO_PREVIOUS"
         go_latest = group_content['vars'].get(go_latest_var)
         if not go_latest:
-            raise ValueError(
-                f"{go_latest_var} variable not found in group.yml, please make sure it is defined before running the pipeline"
-            )
+            data_path = self.data_path or constants.OCP_BUILD_DATA_URL
+            raise ValueError(f"{go_latest_var} variable not found in {data_path} branch {branch} group.yml vars")
         go_previous = group_content['vars'].get(go_previous_var)
         build_major_minor = extract_major_minor(go_version, "golang build version")
         latest_major_minor = extract_major_minor(go_latest, f"group.yml {go_latest_var}")
@@ -750,6 +787,7 @@ class UpdateGolangPipeline:
                     f"Golang builder images:\n{builder_details}"
                 )
                 return
+            upstream_repo = self._get_upstream_ocp_build_data_repo()
             fork_repo = get_github_client_for_org("openshift-bot").get_repo("openshift-bot/ocp-build-data")
             branch_name = f"update-golang-{self.ocp_version}-{go_version}"
             title = f"{self.art_jira} - Bump {self.ocp_version} golang builders to {go_version}"
@@ -940,25 +978,28 @@ class UpdateGolangPipeline:
     def verify_golang_builder_repo(self, el_v, go_version):
         branch = self.get_golang_branch(el_v, go_version)
         filename = 'group.yml'
+        data_path = self.data_path or constants.OCP_BUILD_DATA_URL
 
-        repo = get_github_client_for_org("openshift-eng").get_repo("openshift-eng/ocp-build-data")
-        content = repo.get_contents(filename, ref=branch)
-        group_config = yaml.load(content.decoded_content)
+        try:
+            raw = self._read_data_file(filename, branch)
+        except Exception:
+            _LOGGER.error("Failed to fetch %s from branch %s in %s", filename, branch, data_path)
+            raise
+        group_config = yaml.load(raw)
         content_repo_url_suffix = self.get_content_repo_url_suffix(el_v)
 
         golang_repo = f'rhel-{el_v}-golang-rpms'
         if golang_repo not in group_config['repos']:
             raise ValueError(
-                f"Did not find {golang_repo} defined at "
-                f"https://github.com/openshift-eng/ocp-build-data/blob/{branch}/{filename}. If it's with a different "
-                "name please correct it."
+                f"Did not find {golang_repo} defined in {data_path} branch {branch} {filename}. "
+                "If it's with a different name please correct it."
             )
 
-        major, minor = group_config['vars']['MAJOR'], group_config['vars']['MINOR']
+        ocp_major, ocp_minor = self.ocp_version.split('.')
         err = False
         for arch, template_url in group_config['repos'][golang_repo]['conf']['baseurl'].items():
             expected_suffix = f'{content_repo_url_suffix}/{arch}/'
-            actual_url = template_url.format(MAJOR=major, MINOR=minor)
+            actual_url = template_url.format(MAJOR=ocp_major, MINOR=ocp_minor)
             if not actual_url.endswith(expected_suffix):
                 err = True
                 _LOGGER.error(f"{expected_suffix} not found in URL {actual_url}")

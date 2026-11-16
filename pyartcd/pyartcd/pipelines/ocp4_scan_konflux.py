@@ -408,6 +408,7 @@ class Ocp4ScanPipeline:
 @click.option('--image-list', required=False, help='Comma/space-separated list to of images to scan, empty to scan all')
 @click.option('--skip-rpms', is_flag=True, default=False, help='Skip RPM checks and only scan images')
 @click.option('--ci-kubeconfig', envvar='KUBECONFIG', help='CI cluster credentials (defaults to KUBECONFIG)')
+@click.option('--lock-dry-run', is_flag=True, help='Use shared Redis locks during a dry-run (automatic in Tekton)')
 @pass_runtime
 @click_coroutine
 async def ocp4_scan(
@@ -419,6 +420,7 @@ async def ocp4_scan(
     image_list: str,
     skip_rpms: bool,
     ci_kubeconfig: str,
+    lock_dry_run: bool = False,
 ):
     # Keep CI reads separate from the local artc service-account context.
     if not ci_kubeconfig:
@@ -438,13 +440,21 @@ async def ocp4_scan(
         ci_kubeconfig=ci_kubeconfig,
     )
 
-    if runtime.dry_run:
+    # Tekton dry-runs share the production scan/build locks with Jenkins.
+    # Preserve the existing unlocked dry-run behavior for Jenkins callers.
+    if runtime.dry_run and not (lock_dry_run or tekton.is_tekton_context()):
         await pipeline.run()
 
     else:
         lock = Lock.SCAN_KONFLUX
         lock_name = lock.value.format(version=version)
-        lock_identifier = jenkins.get_build_path_or_random()
+        if tekton.is_tekton_context():
+            lock_identifier = (
+                f'k8s/ns/{os.environ["TASKRUN_NAMESPACE"]}/tekton.dev~v1~PipelineRun/'
+                f'{tekton.get_current_pipelinerun_name()}'
+            )
+        else:
+            lock_identifier = jenkins.get_build_path_or_random()
 
         # Scheduled builds are already being skipped if the lock is already acquired.
         # For manual builds, we need to check if the build and scan locks are already acquired,

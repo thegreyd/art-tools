@@ -272,10 +272,6 @@ class TestBridgeBugMirroring(unittest.IsolatedAsyncioTestCase):
         slack_client.say.assert_awaited_once_with("Bridge bug mirroring failed for 4.23. Please investigate")
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class TestTektonScanner(unittest.IsolatedAsyncioTestCase):
     @patch.dict(os.environ, {'TASKRUN_NAME': 'task', 'TEKTON_PIPELINERUN_NAME': 'scan'})
     @patch('pyartcd.pipelines.ocp4_scan_konflux.tekton.annotate_current_pipelinerun')
@@ -329,3 +325,154 @@ class TestTektonScanner(unittest.IsolatedAsyncioTestCase):
         jenkins.start_build_sync.assert_not_called()
         jenkins.update_title.assert_not_called()
         annotate.assert_called()
+
+
+class TestTektonScannerLocks(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        import inspect
+
+        from pyartcd.pipelines.ocp4_scan_konflux import ocp4_scan
+
+        self.scan = inspect.unwrap(ocp4_scan.callback)
+        self.runtime = MagicMock(spec=Runtime)
+        self.runtime.dry_run = True
+        self.runtime.working_dir = Path('/tmp')
+        self.pipeline = MagicMock()
+        self.pipeline.skipped = True
+        self.scan_key = 'lock:scan-konflux:4.22'
+        self.build_key = 'lock:build-konflux:4.22:stream'
+        self.held = set()
+        self.events = []
+        self.managers = []
+        self.failure = None
+
+        async def scan():
+            self.assertEqual(self.held, {self.scan_key, self.build_key})
+            self.events.append(('scan',))
+            self.pipeline.skipped = False
+            if self.failure:
+                raise self.failure
+
+        self.pipeline.run = AsyncMock(side_effect=scan)
+        self.env = patch.dict(
+            os.environ,
+            {
+                'TASKRUN_NAME': 'scan-task',
+                'TEKTON_PIPELINERUN_NAME': 'scan-123',
+                'TASKRUN_NAMESPACE': 'art-openshift-tenant',
+                # Lock ownership must not depend on a UI link's format.
+                'BUILD_URL': 'https://pipelines.example/#/run/art-openshift-tenant/scan-123',
+            },
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def make_lock_manager(self, _lock):
+        from contextlib import asynccontextmanager
+
+        manager = MagicMock()
+        manager.is_locked = AsyncMock(side_effect=lambda name: name in self.held)
+        manager.get_lock_id = AsyncMock(return_value='job/another-build/123')
+        manager.destroy = AsyncMock()
+
+        @asynccontextmanager
+        async def acquired(resource, lock_identifier):
+            self.held.add(resource)
+            self.events.append(('acquire', resource, lock_identifier))
+            try:
+                yield
+            finally:
+                self.held.remove(resource)
+                self.events.append(('release', resource))
+
+        async def lock(**kwargs):
+            return acquired(**kwargs)
+
+        manager.lock = AsyncMock(side_effect=lock)
+        self.managers.append(manager)
+        return manager
+
+    async def invoke(self):
+        with (
+            patch('pyartcd.pipelines.ocp4_scan_konflux.Ocp4ScanPipeline', return_value=self.pipeline),
+            patch('pyartcd.pipelines.ocp4_scan_konflux.jenkins.init_jenkins') as init_jenkins,
+            patch('pyartcd.pipelines.ocp4_scan_konflux._update_title') as title,
+            patch('pyartcd.locks.LockManager.from_lock', side_effect=self.make_lock_manager),
+        ):
+            try:
+                await self.scan(
+                    runtime=self.runtime,
+                    version='4.22',
+                    assembly='stream',
+                    data_path='https://github.com/openshift-eng/ocp-build-data',
+                    data_gitref='',
+                    image_list='',
+                    skip_rpms=False,
+                    ci_kubeconfig='/ci-creds',
+                )
+            finally:
+                init_jenkins.assert_not_called()
+                for manager in self.managers:
+                    manager.destroy.assert_awaited_once()
+        return title
+
+    async def test_dry_run_acquires_both_locks_with_tekton_owner_then_releases(self):
+        from pyartcd.tekton_locks import parse_k8s_lock_path
+
+        await self.invoke()
+        self.pipeline.run.assert_awaited_once()
+        self.assertEqual([event[1] for event in self.events if event[0] == 'acquire'], [self.scan_key, self.build_key])
+        for event in self.events:
+            if event[0] == 'acquire':
+                self.assertEqual(parse_k8s_lock_path(event[2]), ('art-openshift-tenant', 'scan-123', 'PipelineRun'))
+        self.assertEqual(self.events[-2:], [('release', self.build_key), ('release', self.scan_key)])
+        self.assertFalse(self.held)
+
+    async def test_existing_scan_lock_skips_scanning(self):
+        self.held.add(self.scan_key)
+        title = await self.invoke()
+        self.pipeline.run.assert_not_awaited()
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.held, {self.scan_key})
+        title.assert_called_once_with(' [SKIPPED][LOCKED]')
+
+    async def test_existing_build_lock_skips_scanning_and_releases_scan_lock(self):
+        self.held.add(self.build_key)
+        title = await self.invoke()
+        self.pipeline.run.assert_not_awaited()
+        self.assertEqual(self.events[-1], ('release', self.scan_key))
+        self.assertEqual(self.held, {self.build_key})
+        title.assert_called_once_with(' [SKIPPED][LOCKED]')
+
+    async def test_scan_failure_releases_both_locks(self):
+        self.failure = RuntimeError('scan failed')
+        with self.assertRaisesRegex(RuntimeError, 'scan failed'):
+            await self.invoke()
+        self.assertFalse(self.held)
+        self.assertEqual(self.events[-2:], [('release', self.build_key), ('release', self.scan_key)])
+
+    async def test_jenkins_dry_run_preserves_its_unlocked_behavior(self):
+        self.pipeline.run = AsyncMock()
+        with (
+            patch('pyartcd.pipelines.ocp4_scan_konflux.tekton.is_tekton_context', return_value=False),
+            patch('pyartcd.pipelines.ocp4_scan_konflux.Ocp4ScanPipeline', return_value=self.pipeline),
+            patch('pyartcd.pipelines.ocp4_scan_konflux.jenkins') as jenkins,
+            patch('pyartcd.locks.LockManager.from_lock') as locks,
+        ):
+            await self.scan(
+                runtime=self.runtime,
+                version='4.22',
+                assembly='stream',
+                data_path='https://github.com/openshift-eng/ocp-build-data',
+                data_gitref='',
+                image_list='',
+                skip_rpms=False,
+                ci_kubeconfig='/ci-creds',
+            )
+        locks.assert_not_called()
+        self.pipeline.run.assert_awaited_once()
+        jenkins.init_jenkins.assert_called_once()
+
+
+if __name__ == '__main__':
+    unittest.main()

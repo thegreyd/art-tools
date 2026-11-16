@@ -1,5 +1,4 @@
 import json
-import unittest
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -119,55 +118,3 @@ class TestStartPipelineRunLineage:
         with patch.object(tekton.subprocess, 'run') as oc, pytest.raises(ValueError, match='namespace'):
             self.create(parent_run={'metadata': {'namespace': 'other'}})
         oc.assert_not_called()
-
-
-class TestWaitForPipelineRun(unittest.IsolatedAsyncioTestCase):
-    async def test_pending_then_success(self):
-        from unittest.mock import AsyncMock
-
-        responses = [
-            (0, json.dumps({'status': {'conditions': [{'type': 'Succeeded', 'status': 'Unknown'}]}}), ''),
-            (0, json.dumps({'status': {'conditions': [{'type': 'Succeeded', 'status': 'True'}]}}), ''),
-        ]
-        with (
-            patch.object(tekton.exectools, 'cmd_gather_async', new=AsyncMock(side_effect=responses)) as get,
-            patch.object(tekton.asyncio, 'sleep', new=AsyncMock()) as sleep,
-        ):
-            assert await tekton.wait_for_pipeline_run('scan', namespace='art-openshift-tenant') == 'Succeeded'
-        assert get.await_count == 2
-        sleep.assert_awaited_once()
-
-    async def test_failed_run_does_not_wait_for_timeout(self):
-        from unittest.mock import AsyncMock
-
-        for reason in ('Failed', 'Cancelled', 'PipelineRunTimeout'):
-            with self.subTest(reason=reason):
-                response = (
-                    0,
-                    json.dumps(
-                        {'status': {'conditions': [{'type': 'Succeeded', 'status': 'False', 'reason': reason}]}}
-                    ),
-                    '',
-                )
-                with (
-                    patch.object(tekton.exectools, 'cmd_gather_async', new=AsyncMock(return_value=response)),
-                    patch.object(tekton.asyncio, 'sleep', new=AsyncMock()) as sleep,
-                    self.assertRaisesRegex(RuntimeError, reason),
-                ):
-                    await tekton.wait_for_pipeline_run('scan')
-                sleep.assert_not_awaited()
-
-    async def test_wait_is_bounded(self):
-        from unittest.mock import AsyncMock
-
-        response = (0, '{}', '')
-        with (
-            patch.object(tekton.exectools, 'cmd_gather_async', new=AsyncMock(return_value=response)),
-            pytest.raises(TimeoutError),
-        ):
-            await tekton.wait_for_pipeline_run('scan', timeout_seconds=0.01)
-
-    def test_pipeline_timeout_is_forwarded(self):
-        with patch.object(tekton.subprocess, 'run', return_value=MagicMock(stdout='scan-abc created')) as oc:
-            tekton.start_pipeline_run('ocp4-scan-konflux', {'version': '5.1'}, pipeline_timeout='4h')
-        assert json.loads(oc.call_args.kwargs['input'])['spec']['timeouts'] == {'pipeline': '4h'}

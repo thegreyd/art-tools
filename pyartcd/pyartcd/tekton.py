@@ -1,12 +1,9 @@
-import asyncio
 import json
 import logging
 import os
 import re
 import subprocess
 from typing import Optional
-
-from artcommonlib import exectools
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +97,6 @@ def start_pipeline_run(
     use_current_parent: bool = True,
     kubeconfig: Optional[str] = None,
     run_name: Optional[str] = None,
-    pipeline_timeout: Optional[str] = None,
 ) -> Optional[str]:
     """Create a Tekton PipelineRun to trigger a downstream pipeline.
 
@@ -119,8 +115,6 @@ def start_pipeline_run(
     ``kubeconfig`` selects the target cluster without changing process environment.
     ``run_name`` uses a deterministic name and reuses a matching existing run on
     AlreadyExists. Other failures propagate; deduplication lasts while the run exists.
-
-    ``pipeline_timeout`` overrides the PipelineRun duration (e.g. ``4h``).
 
     Returns the created PipelineRun name, or None if it could not be parsed.
     """
@@ -196,8 +190,6 @@ def start_pipeline_run(
     if run_name:
         pipeline_run['metadata'].pop('generateName')
         pipeline_run['metadata']['name'] = run_name
-    if pipeline_timeout:
-        pipeline_run['spec']['timeouts'] = {'pipeline': pipeline_timeout}
     oc_command = ['oc']
     if kubeconfig:
         oc_command.extend(['--kubeconfig', kubeconfig])
@@ -242,22 +234,3 @@ def start_pipeline_run(
     if created_name:
         logger.info("Child PipelineRun name: %s", created_name)
     return created_name
-
-
-async def wait_for_pipeline_run(name: str, namespace: Optional[str] = None, timeout_seconds: int = 14400) -> str:
-    """Wait for success or fail promptly on a failed/cancelled PipelineRun."""
-    namespace = namespace or _get_namespace()
-    async with asyncio.timeout(timeout_seconds):
-        while True:
-            _, stdout, _ = await exectools.cmd_gather_async(
-                ['oc', '--request-timeout=30s', 'get', 'pipelinerun', name, '-n', namespace, '-o', 'json']
-            )
-            run = json.loads(stdout)
-            for condition in run.get('status', {}).get('conditions', []):
-                if condition.get('type') != 'Succeeded':
-                    continue
-                if condition.get('status') == 'True':
-                    return condition.get('reason', 'Succeeded')
-                if condition.get('status') == 'False':
-                    raise RuntimeError(f'PipelineRun {namespace}/{name}: {condition.get("reason", "Failed")}')
-            await asyncio.sleep(10)

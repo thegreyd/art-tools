@@ -307,3 +307,25 @@ class TestTektonScanner(unittest.IsolatedAsyncioTestCase):
         self.assertIn('--ci-kubeconfig=/ci-creds', cmd.call_args.args[0])
         self.assertIn('--dry-run', cmd.call_args.args[0])
         self.assertEqual(os.environ['KUBECONFIG'], '/wrong-cluster')
+
+    @patch.dict(os.environ, {'TASKRUN_NAME': 'task', 'TEKTON_PIPELINERUN_NAME': 'scan'})
+    @patch('pyartcd.pipelines.ocp4_scan_konflux.tekton.annotate_current_pipelinerun')
+    @patch('pyartcd.pipelines.ocp4_scan_konflux.jenkins')
+    async def test_dry_run_reports_changes_without_triggering_jenkins(self, jenkins, annotate):
+        runtime = MagicMock(spec=Runtime)
+        runtime.dry_run = True
+        runtime.working_dir = Path('/tmp')
+        pipeline = Ocp4ScanPipeline(runtime, '4.22', '', 'stream', '', '', False)
+        pipeline.changes = {'images': ['operator'], 'rpms': ['rpm']}
+        pipeline.report = {'images': [{'name': 'operator', 'changed': True}]}
+        pipeline.handle_source_changes()
+        pipeline.rhcos_outdated = True
+        await pipeline.handle_rhcos_changes()
+        pipeline.rhcos_outdated = False
+        pipeline.rhcos_updated = True
+        await pipeline.handle_rhcos_changes()
+        jenkins.start_ocp4_konflux.assert_not_called()
+        jenkins.start_rhcos.assert_not_called()
+        jenkins.start_build_sync.assert_not_called()
+        jenkins.update_title.assert_not_called()
+        annotate.assert_called()

@@ -274,3 +274,36 @@ class TestBridgeBugMirroring(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestTektonScanner(unittest.IsolatedAsyncioTestCase):
+    @patch.dict(os.environ, {'TASKRUN_NAME': 'task', 'TEKTON_PIPELINERUN_NAME': 'scan'})
+    @patch('pyartcd.pipelines.ocp4_scan_konflux.tekton.annotate_current_pipelinerun')
+    @patch('pyartcd.pipelines.ocp4_scan_konflux.jenkins')
+    async def test_source_changes_still_trigger_jenkins_from_tekton(self, jenkins, annotate):
+        runtime = MagicMock(spec=Runtime)
+        runtime.dry_run = False
+        runtime.working_dir = Path('/tmp')
+        pipeline = Ocp4ScanPipeline(runtime, '5.1', '', 'stream', '', '', False)
+        pipeline.changes = {'images': ['operator'], 'rpms': ['rpm']}
+        pipeline.report = {'images': [{'name': 'operator', 'changed': True}]}
+        pipeline.handle_source_changes()
+        jenkins.update_title.assert_not_called()
+        jenkins.update_description.assert_not_called()
+        jenkins.start_ocp4_konflux.assert_called_once_with(
+            build_version='5.1', assembly='stream', image_list=['operator'], rpm_list=['rpm']
+        )
+        annotate.assert_called()
+
+    @patch.dict(os.environ, {'KUBECONFIG': '/wrong-cluster'})
+    @patch('pyartcd.pipelines.ocp4_scan_konflux.exectools.cmd_gather_async', new_callable=AsyncMock)
+    async def test_explicit_ci_credentials_do_not_change_local_cluster_context(self, cmd):
+        runtime = MagicMock(spec=Runtime)
+        runtime.dry_run = True
+        runtime.working_dir = Path('/tmp')
+        pipeline = Ocp4ScanPipeline(runtime, '5.1', '', 'stream', '', '', False, ci_kubeconfig='/ci-creds')
+        cmd.return_value = (0, '{}', '')
+        await pipeline.get_changes()
+        self.assertIn('--ci-kubeconfig=/ci-creds', cmd.call_args.args[0])
+        self.assertIn('--dry-run', cmd.call_args.args[0])
+        self.assertEqual(os.environ['KUBECONFIG'], '/wrong-cluster')

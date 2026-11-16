@@ -6,7 +6,7 @@ from artcommonlib.telemetry import start_as_current_span_async
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
-from pyartcd import jenkins, util
+from pyartcd import jenkins, tekton, util
 from pyartcd.cli import cli, click_coroutine, pass_runtime
 from pyartcd.locks import Lock, LockManager
 from pyartcd.runtime import Runtime
@@ -42,7 +42,33 @@ async def run_for(version: str, runtime: Runtime, lock_manager: LockManager, ser
         span.set_attribute("skipped_reason", "not_permitted")
         return
 
-    # Schedule scan
+    if runtime.dry_run:
+        runtime.logger.info('[DRY RUN] Would schedule ocp4-scan-konflux for %s', version)
+        return
+
+    # Only the scanner moves to Tekton in phase 1; it still triggers Jenkins builds.
+    if tekton.is_tekton_context():
+        name = tekton.start_pipeline_run(
+            pipeline_name='ocp4-scan-konflux',
+            params={'version': version, 'dry-run': 'false'},
+            pipeline_timeout='4h',
+        )
+        if not name:
+            raise RuntimeError(f'Could not identify the scan PipelineRun for {version}')
+        span.set_attribute('triggered', True)
+        span.set_attribute('pipelinerun', name)
+        if serial:
+            try:
+                result = await tekton.wait_for_pipeline_run(name)
+                runtime.logger.info('[%s] Scan completed with result: %s', version, result)
+                span.set_attribute('scan_result', result)
+            except Exception as e:
+                runtime.logger.warning('[%s] Scan failed, continuing with remaining versions', version, exc_info=True)
+                span.set_attribute('scan_failed', True)
+                span.set_status(StatusCode.ERROR, str(e)[:500])
+        return
+
+    # Preserve the existing Jenkins scheduler behavior.
     span.set_attribute("triggered", True)
     if serial:
         runtime.logger.info('[%s] Scheduling ocp4-scan-konflux (serial: waiting for completion)', version)
@@ -67,7 +93,8 @@ async def run_for(version: str, runtime: Runtime, lock_manager: LockManager, ser
 @pass_runtime
 @click_coroutine
 async def ocp4_scan_konflux(runtime: Runtime, version: tuple, serial: bool):
-    jenkins.init_jenkins()
+    if not tekton.is_tekton_context():
+        jenkins.init_jenkins()
     lock_manager = LockManager([redis.redis_url()])
     with TRACER.start_as_current_span("schedule-ocp4-scan-konflux") as span:
         span.set_attribute("versions", list(version))

@@ -392,7 +392,8 @@ class TestTektonScannerLocks(unittest.IsolatedAsyncioTestCase):
         self.managers.append(manager)
         return manager
 
-    async def invoke(self):
+    async def invoke(self, dry_run=True):
+        self.runtime.dry_run = dry_run
         with (
             patch('pyartcd.pipelines.ocp4_scan_konflux.Ocp4ScanPipeline', return_value=self.pipeline),
             patch('pyartcd.pipelines.ocp4_scan_konflux.jenkins.init_jenkins') as init_jenkins,
@@ -411,22 +412,46 @@ class TestTektonScannerLocks(unittest.IsolatedAsyncioTestCase):
                     ci_kubeconfig='/ci-creds',
                 )
             finally:
-                init_jenkins.assert_not_called()
+                if dry_run:
+                    init_jenkins.assert_not_called()
+                else:
+                    init_jenkins.assert_called_once()
                 for manager in self.managers:
                     manager.destroy.assert_awaited_once()
         return title
 
-    async def test_dry_run_acquires_both_locks_with_tekton_owner_then_releases(self):
+    async def test_live_and_dry_run_acquire_both_locks_with_tekton_owner_then_release(self):
         from pyartcd.tekton_locks import parse_k8s_lock_path
 
-        await self.invoke()
-        self.pipeline.run.assert_awaited_once()
-        self.assertEqual([event[1] for event in self.events if event[0] == 'acquire'], [self.scan_key, self.build_key])
-        for event in self.events:
-            if event[0] == 'acquire':
-                self.assertEqual(parse_k8s_lock_path(event[2]), ('art-openshift-tenant', 'scan-123', 'PipelineRun'))
-        self.assertEqual(self.events[-2:], [('release', self.build_key), ('release', self.scan_key)])
-        self.assertFalse(self.held)
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                self.events.clear()
+                self.managers.clear()
+                self.pipeline.run.reset_mock()
+                await self.invoke(dry_run=dry_run)
+                self.pipeline.run.assert_awaited_once()
+                self.assertEqual(
+                    [event[1] for event in self.events if event[0] == 'acquire'], [self.scan_key, self.build_key]
+                )
+                for event in self.events:
+                    if event[0] == 'acquire':
+                        self.assertEqual(
+                            parse_k8s_lock_path(event[2]), ('art-openshift-tenant', 'scan-123', 'PipelineRun')
+                        )
+                self.assertEqual(self.events[-2:], [('release', self.build_key), ('release', self.scan_key)])
+                self.assertFalse(self.held)
+
+    async def test_live_scan_skips_when_either_jenkins_lock_is_held(self):
+        for key in (self.scan_key, self.build_key):
+            with self.subTest(key=key):
+                self.held = {key}
+                self.events.clear()
+                self.managers.clear()
+                self.pipeline.run.reset_mock()
+                title = await self.invoke(dry_run=False)
+                self.pipeline.run.assert_not_awaited()
+                self.assertEqual(self.held, {key})
+                title.assert_called_once_with(' [SKIPPED][LOCKED]')
 
     async def test_existing_scan_lock_skips_scanning(self):
         self.held.add(self.scan_key)

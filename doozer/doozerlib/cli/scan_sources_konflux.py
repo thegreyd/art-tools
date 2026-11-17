@@ -49,7 +49,7 @@ from doozerlib.util import oc_image_info_for_arch_async
 
 DEFAULT_THRESHOLD_HOURS = 6
 # A fixed invalidation date, rather than a rolling build-age threshold.
-DEFAULT_REBUILD_BEFORE = '2026-11-16T00:00:00Z'
+DEFAULT_REBUILD_BEFORE = None
 
 FLOATING_GOLANG_BUILDER_TAG_RE = re.compile(r'^[^@\s]+:golang-builder-v[0-9]+\.[0-9]+-rhel[0-9]+$')
 

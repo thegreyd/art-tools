@@ -31,7 +31,7 @@ def build_record(start_time, outcome=KonfluxBuildOutcome.SUCCESS):
 class TestBuildCutoffOption(TestCase):
     def test_default_and_explicit_cutoffs(self):
         for args, expected in [
-            ([], CUTOFF),
+            ([], None),
             (['--rebuild-before', '2026-11-16'], CUTOFF.replace(tzinfo=None)),
             (['--rebuild-before', '2026-11-15T19:00:00-05:00'], CUTOFF),
             (['--rebuild-before', '2026-11-16T00:00:00.000000Z'], CUTOFF),
@@ -59,7 +59,7 @@ class TestBuildCutoffOption(TestCase):
             result = CliRunner().invoke(config_scan_source_changes_konflux, ['--skip-rpms'], obj=runtime)
         self.assertEqual(result.exit_code, 0, result.output)
         runtime.initialize.assert_called_once_with(mode='images', clone_distgits=False)
-        self.assertEqual(scanner_class.call_args.kwargs['rebuild_before'], CUTOFF)
+        self.assertIsNone(scanner_class.call_args.kwargs['rebuild_before'])
         self.assertTrue(scanner_class.call_args.kwargs['skip_rpms'])
         scanner_class.return_value.run.assert_awaited_once()
 

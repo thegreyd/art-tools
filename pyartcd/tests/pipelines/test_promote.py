@@ -286,6 +286,42 @@ class TestPromotePipeline(IsolatedAsyncioTestCase):
         cosign.sign_release_images.assert_awaited_once_with([release])
         cosign.sign_component_images.assert_awaited_once_with({f"{component_repo}@{signed_digest}"})
 
+    @patch("pyartcd.pipelines.promote.exectools.cmd_assert_async")
+    async def test_private_multi_promotion_bootstraps_only_the_missing_50_stream(self, create_stream):
+        group_config = Model({"konflux": {"arches": ["x86_64"]}, "multi_arch": {"enabled": True}})
+        releases = {"releases": {"art1": {"assembly": {"type": "custom", "basis": {"patch_version": 1}}}}}
+        create_cmd = ["oc", "-n", "ocp-multi-priv", "create", "imagestream", "release-5-multi-priv"]
+        cases = [
+            ("openshift-5.0", True, False, False, True),
+            ("openshift-5.0", True, True, False, False),
+            ("openshift-5.0", True, False, True, False),
+            ("openshift-5.0", False, False, False, False),
+            ("openshift-5.1", True, False, False, False),
+        ]
+        for group, multi_only, dry_run, exists, should_create in cases:
+            with self.subTest(group=group, multi_only=multi_only, dry_run=dry_run, exists=exists):
+                create_stream.reset_mock()
+                runtime = MagicMock(config={}, working_dir=Path("/path/to/working"), dry_run=dry_run)
+                pipeline = PromotePipeline(
+                    runtime, group, "art1", signing_env="prod", multi_only=multi_only, skip_sigstore=True
+                )
+                pipeline.private_only = True
+                pipeline.get_image_stream = AsyncMock(return_value={"metadata": {}} if exists else None)
+                pipeline.promote = AsyncMock(return_value={})
+
+                if group != "openshift-5.0" or not multi_only:
+                    with self.assertRaisesRegex(ValueError, "Private release ImageStream .* is unavailable"):
+                        await pipeline._promote_private_assembly(group_config, releases)
+                    pipeline.promote.assert_not_awaited()
+                else:
+                    await pipeline._promote_private_assembly(group_config, releases)
+                    pipeline.promote.assert_awaited_once()
+
+                if should_create:
+                    create_stream.assert_awaited_once_with(create_cmd, stdout=ANY)
+                else:
+                    create_stream.assert_not_awaited()
+
     @patch("pyartcd.pipelines.promote.RegistryConfig")
     @patch("pyartcd.jira_client.JIRAClient.from_url", return_value=None)
     @patch("pyartcd.pipelines.promote.util.load_releases_config", return_value={})

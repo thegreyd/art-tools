@@ -835,7 +835,13 @@ class PromotePipeline:
             namespace = f"ocp{go_suffix_for_arch(arch, is_private=True)}"
             stream = self._get_image_stream_name(assembly_type, arch)
             if not await self.get_image_stream(namespace, stream):
-                raise ValueError(f"Private release ImageStream {namespace}/{stream} is unavailable")
+                if (
+                    self.group != "openshift-5.0"
+                    or not self.multi_only
+                    or (namespace, stream) != ("ocp-multi-priv", "release-5-multi-priv")
+                ):
+                    raise ValueError(f"Private release ImageStream {namespace}/{stream} is unavailable")
+                await self._create_private_release_imagestream(namespace, stream)
             targets[arch] = (namespace, stream)
 
         previous_list = [
@@ -890,6 +896,19 @@ class PromotePipeline:
             },
             sys.stdout,
         )
+
+    async def _create_private_release_imagestream(self, namespace: str, stream: str) -> None:
+        cmd = ["oc", "-n", namespace, "create", "imagestream", stream]
+        if self.runtime.dry_run:
+            self._logger.info("[DRY RUN] Would have run %s", cmd)
+            return
+
+        try:
+            await exectools.cmd_assert_async(cmd, stdout=sys.stderr)
+        except ChildProcessError:
+            # Another promotion may have created the stream after the preflight lookup.
+            if not await self.get_image_stream(namespace, stream):
+                raise
 
     async def _trigger_installer_build(self, release_infos: Dict) -> None:
         """Submit the x86_64 ISO build once, without waiting for it or retrying it.
